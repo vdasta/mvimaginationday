@@ -70,12 +70,12 @@ for _, row in attendees_df.iterrows():
 # 2 .  Settings and helpers
 
 TIME_SLOTS  = ["period1", "period2", "period3",
-               "period4", "period5", "period6"]
+               "period4", "period5", "period6", "period7"]
 
 TIME_BLOCKS = {
-    "period1": "9:05-9:40",  "period2": "9:50-10:25",
-    "period3": "10:35-11:10","period4": "11:20-11:55",
-    "period5": "12:05-12:40","period6": "12:50-1:25",
+    "period1": "8:45-9:20",  "period2": "9:25-10:00",
+    "period3": "10:05-10:40","period4": "10:45-11:20",
+    "period5": "11:25-12:00","period6": "12:05-12:40", "period7": "12:45-1:20",
 }
 
 GRADE_ORDER = {"4th": 0, "3rd": 1, "2nd": 2, "1st": 3, "K": 4}
