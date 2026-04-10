@@ -148,11 +148,11 @@ for attendee_id, schedule in assignments.items():
 for sess, p_dict in session_roster.items():
     roster_pdf.add_page()
     roster_pdf.set_font("Helvetica", "B", 18)
-    roster_pdf.cell(0, 10, sess, align="C", ln=1)
+    roster_pdf.cell(0, 10, sess, align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     roster_pdf.set_font("Helvetica", "", 11)
-    roster_pdf.cell(0, 6, f"Location: {ROOM.get(sess, '')}", ln=1)
-    roster_pdf.cell(0, 6, f"Rain Location: {ROOM_RAIN.get(sess, '')}", ln=1)
+    roster_pdf.cell(0, 6, f"Location: {ROOM.get(sess, '')}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    roster_pdf.cell(0, 6, f"Rain Location: {ROOM_RAIN.get(sess, '')}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     roster_pdf.ln(3)
 
     # Column headers

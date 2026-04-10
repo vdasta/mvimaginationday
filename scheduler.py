@@ -258,9 +258,9 @@ class AveryIndexCard(FPDF):
         self.set_x(x0)
 
         self.set_font("Helvetica", "", 11)
-        self.cell(0, 5, f"Grade: {grade}", ln=1)
+        self.cell(0, 5, f"Grade: {grade}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         self.set_x(x0)
-        self.cell(0, 5, f"Teacher: {teacher}", ln=1)
+        self.cell(0, 5, f"Teacher: {teacher}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         self.ln(1)                       # tiny spacer
         self.set_x(x0)
 
