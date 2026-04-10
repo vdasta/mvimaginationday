@@ -1,0 +1,33 @@
+{
+  "student_responses_url": "https://docs.google.com/spreadsheets/d/REPLACE_ME/edit",
+  "student_tab": "Form Responses 1",
+  "catalog_url": "https://docs.google.com/spreadsheets/d/REPLACE_ME/edit",
+  "catalog_tab": "Sheet1",
+  "output_workbook_url": null,
+  "output_workbook_title": "Imagination Day Output",
+  "credentials_file": "credentials.json",
+  "token_file": "token.json",
+  "pdf_output_dir": ".",
+  "session_aliases": {
+    "Basketball (3rd/4th grd)": "Basketball (3rd/4th)",
+    "Strawberry DNA (2nd-4th)": "Strawberry DNA",
+    "Tie Dye (1st-4th)": "Tie Dye",
+    "Yoga Storytelling (K-2nd)": "Yoga"
+  },
+  "grade_lunch_assignments": {
+    "K": "Lunch1",
+    "1st": "Lunch1",
+    "2nd": "Lunch1",
+    "3rd": "Lunch2",
+    "4th": "Lunch2"
+  },
+  "time_blocks": {
+    "period1": "8:45-9:20",
+    "period2": "9:25-10:00",
+    "period3": "10:05-10:40",
+    "period4": "10:45-11:20",
+    "period5": "11:25-12:00",
+    "period6": "12:05-12:40",
+    "period7": "12:45-1:20"
+  }
+}

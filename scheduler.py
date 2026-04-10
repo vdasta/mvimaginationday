@@ -1,311 +1,405 @@
 #!/usr/bin/env python3
-# imagination_day_scheduler.py
-#
-# • Gives 4th-graders first pick
-# • Seats “scarce-choice” students earlier
-# • Exports a wait-list when a class fills up
-# • Generates CSVs + 8-up PDF index cards
-#
-# ---------------------------------------------------------------------------
 
-import pandas as pd
-from fpdf import FPDF
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
-from collections import defaultdict
 
-# ---------------------------------------------------------------------------
-# 0 .  File locations (edit if you like)
-ATTENDEES_CSV   = Path("attendees1.csv")
-SESSIONS_CSV    = Path("sessions.csv")
-ROOMS_CSV       = Path("rooms.csv")
-
-OUT_ATTENDEE_CSV       = Path("attendee_schedule.csv")
-OUT_ATTENDEE_LONG_CSV  = Path("attendee_schedule_long.csv")
-OUT_SESSION_CSV        = Path("session_attendees.csv")
-OUT_WAITLIST_CSV       = Path("wait_lists.csv")
-OUT_PDF                = Path("attendee_schedule.pdf")
-
-# ---------------------------------------------------------------------------
-# 1 .  Load data
-
-attendees_df = pd.read_csv(ATTENDEES_CSV)
-sessions_df  = pd.read_csv(SESSIONS_CSV)
-
-# sessions:  {session: {period1: cap, …}}
-sessions = sessions_df.set_index("Session").to_dict(orient="index")
-
-# 1b.  Load room assignments -----------------------------------------------
-
-rooms_df = pd.read_csv(ROOMS_CSV)
-
-# Try to guess the column names once, so the file can be re-used next year
-dry_col  = next(c for c in rooms_df.columns if "rain"   not in c.lower() and "room" in c.lower())
-rain_col = next((c for c in rooms_df.columns if "rain"  in c.lower()), None)   # optional
-
-ROOM      : dict[str, str] = {}
-ROOM_RAIN : dict[str, str] = {}
-
-for _, row in rooms_df.iterrows():
-    sess = str(row["Session"]).strip()
-    ROOM[sess]      = str(row[dry_col]).strip()  if pd.notna(row[dry_col])  else ""
-    ROOM_RAIN[sess] = str(row[rain_col]).strip() if rain_col and pd.notna(row[rain_col]) else ""
-
-
-# attendee_info:  {name: {"Grade": …, "Teacher": …, "Choices": [s1, …]}}
-attendee_info = {}
-for _, row in attendees_df.iterrows():
-    choices = [
-        row[f"Choice{i}"] for i in range(1, 11)
-        if pd.notna(row[f"Choice{i}"])
-    ]
-    # de-duplicate while keeping order
-    choices = list(dict.fromkeys(choices))
-    attendee_info[row["Name"]] = {
-        "Grade"  : row["Grade"],
-        "Teacher": row["Teacher"],
-        "Choices": choices,
-    }
-
-# ---------------------------------------------------------------------------
-# 2 .  Settings and helpers
-
-TIME_SLOTS  = ["period1", "period2", "period3",
-               "period4", "period5", "period6", "period7"]
-
-TIME_BLOCKS = {
-    "period1": "8:45-9:20",  "period2": "9:25-10:00",
-    "period3": "10:05-10:40","period4": "10:45-11:20",
-    "period5": "11:25-12:00","period6": "12:05-12:40", "period7": "12:45-1:20",
-}
-
-GRADE_ORDER = {"4th": 0, "3rd": 1, "2nd": 2, "1st": 3, "K": 4}
-
-# total seats per session (all periods)
-SESSION_CAPACITY = {s: sum(p.values()) for s, p in sessions.items()}
-
-def grade_rank(name: str) -> int:
-    return GRADE_ORDER.get(attendee_info[name]["Grade"], 99)
-
-def scarcity_score(name: str) -> int:
-    """Lower = scarcer wish list (seat count min)."""
-    caps = [SESSION_CAPACITY.get(c, 0) for c in attendee_info[name]["Choices"]]
-    return min(caps) if caps else 0
-
-# ---------------------------------------------------------------------------
-# 3 .  Sort attendees ➀ grade, ➁ scarcity
-
-sorted_attendees = sorted(
-    attendee_info.keys(),
-    key=lambda n: (grade_rank(n), scarcity_score(n))
+from imagination_day import (
+    canonical_grade_lunch_assignments,
+    ConfigError,
+    GoogleSheetsClient,
+    OUTPUT_TABS,
+    TAB_CATALOG,
+    TAB_DRAFT,
+    TAB_FINAL,
+    TAB_GAPS,
+    TAB_INSTRUCTIONS,
+    TAB_ROSTERS,
+    TAB_RUN_STATUS,
+    TAB_TEACHER,
+    TAB_VALIDATION,
+    TAB_WAITLIST,
+    build_catalog_snapshot_rows,
+    build_final_waitlist_rows,
+    build_gap_rows,
+    build_generated_schedule_rows,
+    build_instruction_rows,
+    build_run_summary_rows,
+    build_session_roster_rows,
+    build_teacher_view_rows,
+    build_validation_rows,
+    build_waitlist_rows,
+    ensure_output_workbook,
+    generate_pdf_outputs,
+    load_config,
+    parse_attendees,
+    parse_catalog,
+    parse_schedule_rows,
+    save_config,
+    validate_data,
+    ValidationIssue,
+    assign_attendees,
 )
 
 
-# ---------------------------------------------------------------------------
-# 4 .  Greedy assignment loop + wait-list capture
-
-assignments = {n: {p: None for p in TIME_SLOTS} for n in attendee_info}
-
-wait_lists  = defaultdict(list)      # {session: [(student, pref_rank), …]}
-
-for student in sorted_attendees:
-    taken_periods = set()
-    prefs = attendee_info[student]["Choices"]
-
-    for rank, session in enumerate(prefs, start=1):
-        if session not in sessions:
-            continue  # bad session name in CSV; skip silently
-
-        # periods still open for this session AND this student
-        open_periods = {
-            ts: cap for ts, cap in sessions[session].items()
-            if cap > 0 and ts not in taken_periods
-        }
-
-        if not open_periods:
-            wait_lists[session].append((student, rank))
-            continue
-
-        # choose the period with **most** seats left (keeps options for others)
-        best_period = max(open_periods, key=open_periods.get)
-
-        # book it
-        assignments[student][best_period] = session
-        sessions[session][best_period]  -= 1
-        taken_periods.add(best_period)
-
-# ---------------------------------------------------------------------------
-# 4a.  Diagnostics – gaps & top-3 miss --------------------------------------
-
-gaps = []            # list of (name, empty_periods)
-top3_miss = []       # list of names
-
-for name, sched in assignments.items():
-    blanks = [p for p, sess in sched.items() if sess is None]
-    if blanks:
-        gaps.append((name, blanks))
-
-    # Did the student land at least one of their first three choices?
-    got_top3 = any(
-        (sched[p] in attendee_info[name]["Choices"][:2])
-        for p in TIME_SLOTS
-        if sched[p]                          # ignore blanks
-    )
-    if not got_top3:
-        top3_miss.append(name)
-
-# Write the two reports
-with open("gaps_in_schedule.csv", "w", newline="") as f:
-    f.write("Student,Grade,Teacher,BlankPeriods\n")
-    for name, blanks in gaps:
-        info = attendee_info[name]
-        f.write(f"{name},{info['Grade']},{info['Teacher']},"
-                f"\"{', '.join(blanks)}\"\n")
-
-with open("top3_miss.csv", "w", newline="") as f:
-    f.write("Student,Grade,Teacher\n")
-    for name in top3_miss:
-        info = attendee_info[name]
-        f.write(f"{name},{info['Grade']},{info['Teacher']}\n")
-
-# ---------------------------------------------------------------------------
-# 5 .  CSV exports
-
-# 5a.  Per-student compact schedule
-with OUT_ATTENDEE_CSV.open("w", newline="") as f:
-    header = "Name,Grade,Teacher," + ",".join([f.capitalize() for f in TIME_SLOTS])
-    f.write(header + "\n")
-    for name, sched in assignments.items():
-        row = [
-            name,
-            attendee_info[name]["Grade"],
-            attendee_info[name]["Teacher"],
-            *[sched[p] or "" for p in TIME_SLOTS],
-        ]
-        f.write(",".join(row) + "\n")
-
-# 5b.  Per-student long form
-with OUT_ATTENDEE_LONG_CSV.open("w", newline="") as f:
-    for name, sched in assignments.items():
-        f.write(f"{name}\n{attendee_info[name]['Grade']},"
-                f"{attendee_info[name]['Teacher']}\n\n")
-        f.write("Period,Session\n")
-        for p in TIME_SLOTS:
-            f.write(f"{p},{sched[p] or ''}\n")
-        f.write("\n")
-
-# 5c.  Per-session rosters
-with OUT_SESSION_CSV.open("w", newline="") as f:
-    f.write("Session,Period,Students\n")
-    for session in sessions_df["Session"]:
-        for p in TIME_SLOTS:
-            kids = [s for s, sc in assignments.items() if sc[p] == session]
-            f.write(f"{session},{p},\"{'; '.join(kids)}\"\n")
-
-# 5d.  Wait-lists
-with OUT_WAITLIST_CSV.open("w", newline="") as f:
-    f.write("Session,Student,PreferenceRank\n")
-    for session, ppl in wait_lists.items():
-        for name, rank in ppl:
-            f.write(f"{session},{name},{rank}\n")
-
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# 6 .  Avery 5388 / 5889 index cards  (2 × 4 grid on US-Letter)  -------------
-
-from fpdf.enums import XPos, YPos
-
-# -- Card / sheet geometry (in mm) -----------------------------------------
-CARD_W      = 100          # 3.94"  safe printable width
-CARD_H      = 64           # 2.52"  safe printable height
-LEFT_MARGIN = 7            # left edge to first card
-TOP_MARGIN  = 10           # top edge to first card
-COL_GAP     = 6            # gutter between the two columns
-
-# -- Column layout inside the table ----------------------------------------
-COLS = [("Time", 21), ("Session", 42), ("Room", 17), ("Rain", 17)]
-
-class AveryIndexCard(FPDF):
-    def draw_card(self, *, name, grade, teacher, sched, x, y):
-        x0, y0 = x, y          # remember left edge
-
-        # ------------------------------------------------ Header ----------
-        self.set_xy(x0, y0)
-        self.set_font("Helvetica", "B", 14)
-        self.multi_cell(CARD_W, 7, name)   # auto line-feed
-        self.set_x(x0)
-
-        self.set_font("Helvetica", "", 11)
-        self.cell(0, 5, f"Grade: {grade}", ln=1)
-        self.set_x(x0)
-        self.cell(0, 5, f"Teacher: {teacher}", ln=1)
-        self.ln(1)                       # tiny spacer
-        self.set_x(x0)
-
-        # ---------------------------------------------- Table header ------
-        self.set_font("Helvetica", "B", 8)
-        for label, w in COLS:
-            self.cell(w, 5, label, border=1, align="C")
-        self.ln(5)
-        self.set_x(x0)
-
-        # ---------------------------------------------- Table rows --------
-        self.set_font("Helvetica", "", 8)
-        for p in TIME_SLOTS:
-            session = sched[p] or ""
-
-            # Time
-            self.cell(COLS[0][1], 5, TIME_BLOCKS[p], border=1)
-
-            # Session (may wrap)
-            x_before, y_before = self.get_x(), self.get_y()
-            self.multi_cell(
-                COLS[1][1], 5, session,
-                border=1, align="L"
-            )
-            # multi_cell moved cursor — realign for Room/Rain
-            self.set_xy(x_before + COLS[1][1], y_before)
-
-            # Room / Rain
-            self.cell(COLS[2][1], 5, ROOM.get(session, ""),      border=1)
-            self.cell(COLS[3][1], 5, ROOM_RAIN.get(session, ""), border=1)
-
-            self.ln(5)            # move to next row
-            self.set_x(x0)        # …but keep inside this card
-
-        # Optional outline for test prints
-        # self.rect(x0, y0, CARD_W, CARD_H)
-
-# -- Build the sheet --------------------------------------------------------
-pdf = AveryIndexCard(orientation="P", unit="mm", format="Letter")
-pdf.set_auto_page_break(False)   # manual grid; don’t let FPDF break pages
-
-for idx, (name, sched) in enumerate(assignments.items()):
-    # new sheet every 8 cards
-    if idx % 8 == 0:
-        pdf.add_page()
-
-    row = idx % 4                      # 0-3 in the current sheet
-    col = (idx // 4) % 2               # 0 or 1
-
-    x = LEFT_MARGIN + col * (CARD_W + COL_GAP)
-    y = TOP_MARGIN  + row * CARD_H
-
-    pdf.draw_card(
-        name=name,
-        grade=attendee_info[name]["Grade"],
-        teacher=attendee_info[name]["Teacher"],
-        sched=sched,
-        x=x,
-        y=y
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Imagination Day scheduler")
+    parser.add_argument(
+        "--config",
+        default="config.json",
+        help="Path to the scheduler config file (default: config.json)",
     )
 
-pdf.output(str(OUT_PDF))
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("validate", help="Validate the source sheets and refresh validation tabs")
+    subparsers.add_parser("run", help="Generate a draft schedule into the output workbook")
+    subparsers.add_parser(
+        "refresh-final",
+        help="Revalidate the edited Final Schedule and refresh final waitlist/gaps/rosters without generating PDFs",
+    )
+
+    printables = subparsers.add_parser(
+        "printables",
+        help="Refresh final reports from the Final Schedule tab and generate PDFs",
+    )
+    printables.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for generated PDFs (defaults to config pdf_output_dir)",
+    )
+
+    init_config = subparsers.add_parser(
+        "init-config",
+        help="Write a starter config file if one does not already exist",
+    )
+    init_config.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the target config file if it already exists",
+    )
+    return parser
 
 
+def init_config_file(config_path: Path, *, force: bool) -> None:
+    from imagination_day import DEFAULT_CONFIG
 
-print("✔ Scheduling complete:")
-print(f"  • {OUT_ATTENDEE_CSV.name}")
-print(f"  • {OUT_ATTENDEE_LONG_CSV.name}")
-print(f"  • {OUT_SESSION_CSV.name}")
-print(f"  • {OUT_WAITLIST_CSV.name}")
-print(f"  • {OUT_PDF.name}")
+    if config_path.exists() and not force:
+        raise ConfigError(
+            f"{config_path} already exists. Use --force to overwrite it."
+        )
+    save_config(config_path, DEFAULT_CONFIG)
+    print(f"Wrote starter config to {config_path}")
+
+
+def load_source_data(client: GoogleSheetsClient, config: dict) -> tuple:
+    student_rows = client.read_range(
+        config["student_responses_url"],
+        config["student_tab"],
+        "A:ZZ",
+    )
+    catalog_rows = client.read_range(
+        config["catalog_url"],
+        config["catalog_tab"],
+        "A:ZZ",
+    )
+
+    attendees, attendee_issues = parse_attendees(student_rows, config)
+    sessions, time_slots, catalog_issues = parse_catalog(catalog_rows)
+    issues = validate_data(attendees, sessions, attendee_issues + catalog_issues, config)
+
+    student_meta = client.get_metadata(config["student_responses_url"])
+    catalog_meta = client.get_metadata(config["catalog_url"])
+    return attendees, sessions, time_slots, issues, student_meta, catalog_meta
+
+
+def write_validation_outputs(
+    client: GoogleSheetsClient,
+    output_workbook_url: str,
+    sessions: dict,
+    time_slots: list[str],
+    issues: list[ValidationIssue],
+    summary_rows: list[list[str]],
+) -> None:
+    client.clear_and_write_tab(output_workbook_url, TAB_INSTRUCTIONS, build_instruction_rows())
+    client.clear_and_write_tab(output_workbook_url, TAB_VALIDATION, build_validation_rows(issues))
+    if sessions and time_slots:
+        client.clear_and_write_tab(
+            output_workbook_url,
+            TAB_CATALOG,
+            build_catalog_snapshot_rows(sessions, time_slots),
+        )
+    client.clear_and_write_tab(output_workbook_url, TAB_RUN_STATUS, summary_rows)
+    client.sync_output_tab_protections(output_workbook_url)
+
+
+def fatal_issue_count(issues: list[ValidationIssue]) -> int:
+    return sum(1 for issue in issues if issue.is_fatal)
+
+
+def read_tab_rows(client: GoogleSheetsClient, workbook_url: str, tab_title: str) -> list[list[str]]:
+    return client.read_range(workbook_url, tab_title, "A:ZZ")
+
+
+def command_validate(config_path: Path) -> int:
+    config = load_config(config_path)
+    client = GoogleSheetsClient(config["credentials_file"], config["token_file"])
+    output_workbook_url = ensure_output_workbook(client, config, config_path)
+
+    attendees, sessions, time_slots, issues, student_meta, catalog_meta = load_source_data(client, config)
+    fatal_count = fatal_issue_count(issues)
+
+    summary_rows = build_run_summary_rows(
+        student_source_title=student_meta["properties"]["title"],
+        catalog_source_title=catalog_meta["properties"]["title"],
+        output_workbook_url=output_workbook_url,
+        attendee_count=len(attendees),
+        issue_count=len(issues),
+        fatal_issue_count=fatal_count,
+        lunch_assignments_count=len(canonical_grade_lunch_assignments(config)),
+        command_name="validate",
+    )
+    write_validation_outputs(client, output_workbook_url, sessions, time_slots, issues, summary_rows)
+
+    print(f"Validation refreshed in {output_workbook_url}")
+    print(f"Issues: {len(issues)} total, {fatal_count} fatal")
+    return 1 if fatal_count else 0
+
+
+def command_run(config_path: Path) -> int:
+    config = load_config(config_path)
+    client = GoogleSheetsClient(config["credentials_file"], config["token_file"])
+    output_workbook_url = ensure_output_workbook(client, config, config_path)
+    client.ensure_tabs(output_workbook_url, OUTPUT_TABS)
+    existing_draft_rows = read_tab_rows(client, output_workbook_url, TAB_DRAFT)
+    existing_final_rows = read_tab_rows(client, output_workbook_url, TAB_FINAL)
+
+    attendees, sessions, time_slots, issues, student_meta, catalog_meta = load_source_data(client, config)
+    fatal_count = fatal_issue_count(issues)
+
+    if fatal_count:
+        summary_rows = build_run_summary_rows(
+            student_source_title=student_meta["properties"]["title"],
+            catalog_source_title=catalog_meta["properties"]["title"],
+            output_workbook_url=output_workbook_url,
+            attendee_count=len(attendees),
+            issue_count=len(issues),
+            fatal_issue_count=fatal_count,
+            lunch_assignments_count=len(canonical_grade_lunch_assignments(config)),
+            command_name="run",
+        )
+        write_validation_outputs(client, output_workbook_url, sessions, time_slots, issues, summary_rows)
+        print(f"Run stopped because validation found {fatal_count} fatal issue(s).")
+        print(f"See {TAB_VALIDATION} in {output_workbook_url}")
+        return 1
+
+    assignments, wait_lists = assign_attendees(attendees, sessions, time_slots, config)
+    generated_rows = build_generated_schedule_rows(attendees, assignments, time_slots)
+    waitlist_rows = build_waitlist_rows(wait_lists, attendees)
+    gap_rows = build_gap_rows(attendees, assignments, time_slots)
+    roster_rows = build_session_roster_rows(attendees, assignments, sessions, time_slots)
+    teacher_rows = build_teacher_view_rows(attendees, assignments, time_slots)
+
+    final_schedule_seeded = False
+    final_schedule_refreshed = False
+    if not existing_final_rows or len(existing_final_rows) <= 1:
+        client.clear_and_write_tab(output_workbook_url, TAB_FINAL, generated_rows)
+        final_schedule_seeded = True
+    elif existing_draft_rows and existing_final_rows == existing_draft_rows:
+        client.clear_and_write_tab(output_workbook_url, TAB_FINAL, generated_rows)
+        final_schedule_refreshed = True
+
+    summary_rows = build_run_summary_rows(
+        student_source_title=student_meta["properties"]["title"],
+        catalog_source_title=catalog_meta["properties"]["title"],
+        output_workbook_url=output_workbook_url,
+        attendee_count=len(attendees),
+        issue_count=len(issues),
+        fatal_issue_count=fatal_count,
+        gap_count=max(len(gap_rows) - 1, 0),
+        waitlist_count=max(len(waitlist_rows) - 1, 0),
+        seeded_final_schedule=final_schedule_seeded,
+        lunch_assignments_count=len(canonical_grade_lunch_assignments(config)),
+        command_name="run",
+    )
+
+    client.clear_and_write_tab(output_workbook_url, TAB_INSTRUCTIONS, build_instruction_rows())
+    client.clear_and_write_tab(output_workbook_url, TAB_VALIDATION, build_validation_rows(issues))
+    client.clear_and_write_tab(output_workbook_url, TAB_DRAFT, generated_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_WAITLIST, waitlist_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_GAPS, gap_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_ROSTERS, roster_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_TEACHER, teacher_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_CATALOG, build_catalog_snapshot_rows(sessions, time_slots))
+    client.clear_and_write_tab(output_workbook_url, TAB_RUN_STATUS, summary_rows)
+    client.sync_output_tab_protections(output_workbook_url)
+
+    print(f"Draft schedule written to {output_workbook_url}")
+    if final_schedule_seeded:
+        print(f"{TAB_FINAL} was empty, so it was seeded automatically from {TAB_DRAFT}.")
+    elif final_schedule_refreshed:
+        print(f"{TAB_FINAL} matched the previous draft, so it was refreshed automatically.")
+    else:
+        print(f"{TAB_FINAL} already contained data and was left unchanged.")
+    return 0
+
+
+def validate_final_schedule(
+    attendees,
+    assignments,
+    sessions,
+    config,
+) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    known_sessions = set(sessions)
+    attendee_map = {attendee.attendee_id: attendee for attendee in attendees}
+    lunch_assignments = canonical_grade_lunch_assignments(config)
+
+    for attendee_id, schedule in assignments.items():
+        attendee = attendee_map[attendee_id]
+        for period, session_name in schedule.items():
+            if session_name and session_name not in known_sessions:
+                issues.append(
+                    ValidationIssue(
+                        "ERROR",
+                        "final_schedule_session",
+                        attendee.name,
+                        f"{period} references '{session_name}', which is not in the catalog.",
+                    )
+                )
+
+        expected_lunch = lunch_assignments.get(attendee.grade)
+        if expected_lunch:
+            lunch_periods = [
+                period for period, session_name in schedule.items()
+                if session_name == expected_lunch
+            ]
+            if not lunch_periods:
+                issues.append(
+                    ValidationIssue(
+                        "ERROR",
+                        "final_schedule_lunch",
+                        attendee.name,
+                        f"{attendee.grade} students must include '{expected_lunch}' in the final schedule.",
+                    )
+                )
+    return issues
+
+
+def refresh_final_outputs(
+    config_path: Path,
+    *,
+    output_dir_override: str | None,
+    generate_pdfs: bool,
+) -> int:
+    config = load_config(config_path)
+    client = GoogleSheetsClient(config["credentials_file"], config["token_file"])
+    output_workbook_url = ensure_output_workbook(client, config, config_path)
+    client.ensure_tabs(output_workbook_url, OUTPUT_TABS)
+
+    catalog_rows = client.read_range(config["catalog_url"], config["catalog_tab"], "A:ZZ")
+    sessions, time_slots, catalog_issues = parse_catalog(catalog_rows)
+    student_rows = client.read_range(config["student_responses_url"], config["student_tab"], "A:ZZ")
+    source_attendees, attendee_issues = parse_attendees(student_rows, config)
+    final_rows = client.read_range(output_workbook_url, TAB_FINAL, "A:ZZ")
+    if len(final_rows) <= 1:
+        print(f"{TAB_FINAL} is empty. Run `python scheduler.py run` and edit that tab first.")
+        return 1
+
+    attendees, assignments, final_time_slots = parse_schedule_rows(final_rows)
+    issues = catalog_issues + attendee_issues + validate_final_schedule(attendees, assignments, sessions, config)
+    fatal_count = fatal_issue_count(issues)
+
+    student_meta = client.get_metadata(config["student_responses_url"])
+    catalog_meta = client.get_metadata(config["catalog_url"])
+    summary_rows = build_run_summary_rows(
+        student_source_title=student_meta["properties"]["title"],
+        catalog_source_title=catalog_meta["properties"]["title"],
+        output_workbook_url=output_workbook_url,
+        attendee_count=len(attendees),
+        issue_count=len(issues),
+        fatal_issue_count=fatal_count,
+        lunch_assignments_count=len(canonical_grade_lunch_assignments(config)),
+        command_name="printables" if generate_pdfs else "refresh-final",
+    )
+    write_validation_outputs(client, output_workbook_url, sessions, time_slots, issues, summary_rows)
+
+    if fatal_count:
+        action = "Printable generation" if generate_pdfs else "Final report refresh"
+        print(f"{action} stopped because validation found {fatal_count} fatal issue(s).")
+        print(f"See {TAB_VALIDATION} in {output_workbook_url}")
+        return 1
+
+    roster_rows = build_session_roster_rows(attendees, assignments, sessions, final_time_slots)
+    teacher_rows = build_teacher_view_rows(attendees, assignments, final_time_slots)
+    gap_rows = build_gap_rows(attendees, assignments, final_time_slots)
+    waitlist_rows = build_final_waitlist_rows(attendees, assignments, source_attendees)
+    client.clear_and_write_tab(output_workbook_url, TAB_INSTRUCTIONS, build_instruction_rows())
+    client.clear_and_write_tab(output_workbook_url, TAB_WAITLIST, waitlist_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_GAPS, gap_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_ROSTERS, roster_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_TEACHER, teacher_rows)
+    client.sync_output_tab_protections(output_workbook_url)
+
+    if not generate_pdfs:
+        print(f"Final reports refreshed in {output_workbook_url}")
+        return 0
+
+    output_dir = Path(output_dir_override or config["pdf_output_dir"]).expanduser()
+    cards_pdf, rosters_pdf = generate_pdf_outputs(
+        attendees,
+        assignments,
+        sessions,
+        final_time_slots,
+        config["time_blocks"],
+        output_dir,
+    )
+
+    print(f"Generated PDFs:\n- {cards_pdf}\n- {rosters_pdf}")
+    return 0
+
+
+def command_refresh_final(config_path: Path) -> int:
+    return refresh_final_outputs(
+        config_path,
+        output_dir_override=None,
+        generate_pdfs=False,
+    )
+
+
+def command_printables(config_path: Path, output_dir_override: str | None) -> int:
+    return refresh_final_outputs(
+        config_path,
+        output_dir_override=output_dir_override,
+        generate_pdfs=True,
+    )
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    config_path = Path(args.config).expanduser()
+
+    try:
+        if args.command == "init-config":
+            init_config_file(config_path, force=args.force)
+            return 0
+        if args.command == "validate":
+            return command_validate(config_path)
+        if args.command == "run":
+            return command_run(config_path)
+        if args.command == "refresh-final":
+            return command_refresh_final(config_path)
+        if args.command == "printables":
+            return command_printables(config_path, args.output_dir)
+        parser.error(f"Unknown command: {args.command}")
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}")
+        return 1
+    except Exception as exc:  # pragma: no cover - CLI safety net
+        print(f"Error: {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

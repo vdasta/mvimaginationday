@@ -1,2 +1,7 @@
 *.csv
 *.pdf
+config.json
+credentials.json
+token.json
+__pycache__/
+.venv/
