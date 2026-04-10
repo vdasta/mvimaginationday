@@ -8,6 +8,7 @@
 #
 # ---------------------------------------------------------------------------
 
+import csv
 import pandas as pd
 from fpdf import FPDF
 from pathlib import Path
@@ -51,16 +52,18 @@ for _, row in rooms_df.iterrows():
     ROOM_RAIN[sess] = str(row[rain_col]).strip() if rain_col and pd.notna(row[rain_col]) else ""
 
 
-# attendee_info:  {name: {"Grade": …, "Teacher": …, "Choices": [s1, …]}}
+# attendee_info:  {attendee_id: {"Name": …, "Grade": …, "Teacher": …, "Choices": [s1, …]}}
 attendee_info = {}
-for _, row in attendees_df.iterrows():
+for row_idx, row in attendees_df.iterrows():
     choices = [
         row[f"Choice{i}"] for i in range(1, 11)
         if pd.notna(row[f"Choice{i}"])
     ]
     # de-duplicate while keeping order
     choices = list(dict.fromkeys(choices))
-    attendee_info[row["Name"]] = {
+    attendee_id = f"row-{row_idx + 1}"
+    attendee_info[attendee_id] = {
+        "Name"   : str(row["Name"]).strip(),
         "Grade"  : row["Grade"],
         "Teacher": row["Teacher"],
         "Choices": choices,
@@ -82,6 +85,23 @@ GRADE_ORDER = {"4th": 0, "3rd": 1, "2nd": 2, "1st": 3, "K": 4}
 
 # total seats per session (all periods)
 SESSION_CAPACITY = {s: sum(p.values()) for s, p in sessions.items()}
+
+# Validate that every requested session exists before assignment starts.
+unknown_sessions = defaultdict(list)
+for attendee_id, info in attendee_info.items():
+    for session in info["Choices"]:
+        if session not in sessions:
+            unknown_sessions[session].append(info["Name"])
+
+if unknown_sessions:
+    problems = [
+        f"{session} (requested by {', '.join(sorted(names))})"
+        for session, names in sorted(unknown_sessions.items())
+    ]
+    raise ValueError(
+        "Unknown session names found in attendees1.csv:\n  - "
+        + "\n  - ".join(problems)
+    )
 
 def grade_rank(name: str) -> int:
     return GRADE_ORDER.get(attendee_info[name]["Grade"], 99)
@@ -112,9 +132,6 @@ for student in sorted_attendees:
     prefs = attendee_info[student]["Choices"]
 
     for rank, session in enumerate(prefs, start=1):
-        if session not in sessions:
-            continue  # bad session name in CSV; skip silently
-
         # periods still open for this session AND this student
         open_periods = {
             ts: cap for ts, cap in sessions[session].items()
@@ -146,7 +163,7 @@ for name, sched in assignments.items():
 
     # Did the student land at least one of their first three choices?
     got_top3 = any(
-        (sched[p] in attendee_info[name]["Choices"][:2])
+        (sched[p] in attendee_info[name]["Choices"][:3])
         for p in TIME_SLOTS
         if sched[p]                          # ignore blanks
     )
@@ -154,59 +171,65 @@ for name, sched in assignments.items():
         top3_miss.append(name)
 
 # Write the two reports
-with open("gaps_in_schedule.csv", "w", newline="") as f:
-    f.write("Student,Grade,Teacher,BlankPeriods\n")
-    for name, blanks in gaps:
-        info = attendee_info[name]
-        f.write(f"{name},{info['Grade']},{info['Teacher']},"
-                f"\"{', '.join(blanks)}\"\n")
+with open("gaps_in_schedule.csv", "w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["Student", "Grade", "Teacher", "BlankPeriods"])
+    for attendee_id, blanks in gaps:
+        info = attendee_info[attendee_id]
+        writer.writerow([info["Name"], info["Grade"], info["Teacher"], ", ".join(blanks)])
 
-with open("top3_miss.csv", "w", newline="") as f:
-    f.write("Student,Grade,Teacher\n")
-    for name in top3_miss:
-        info = attendee_info[name]
-        f.write(f"{name},{info['Grade']},{info['Teacher']}\n")
+with open("top3_miss.csv", "w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["Student", "Grade", "Teacher"])
+    for attendee_id in top3_miss:
+        info = attendee_info[attendee_id]
+        writer.writerow([info["Name"], info["Grade"], info["Teacher"]])
 
 # ---------------------------------------------------------------------------
 # 5 .  CSV exports
 
 # 5a.  Per-student compact schedule
-with OUT_ATTENDEE_CSV.open("w", newline="") as f:
-    header = "Name,Grade,Teacher," + ",".join([f.capitalize() for f in TIME_SLOTS])
-    f.write(header + "\n")
-    for name, sched in assignments.items():
-        row = [
-            name,
-            attendee_info[name]["Grade"],
-            attendee_info[name]["Teacher"],
+with OUT_ATTENDEE_CSV.open("w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["Name", "Grade", "Teacher", *[p.capitalize() for p in TIME_SLOTS]])
+    for attendee_id, sched in assignments.items():
+        info = attendee_info[attendee_id]
+        writer.writerow([
+            info["Name"],
+            info["Grade"],
+            info["Teacher"],
             *[sched[p] or "" for p in TIME_SLOTS],
-        ]
-        f.write(",".join(row) + "\n")
+        ])
 
 # 5b.  Per-student long form
-with OUT_ATTENDEE_LONG_CSV.open("w", newline="") as f:
-    for name, sched in assignments.items():
-        f.write(f"{name}\n{attendee_info[name]['Grade']},"
-                f"{attendee_info[name]['Teacher']}\n\n")
-        f.write("Period,Session\n")
+with OUT_ATTENDEE_LONG_CSV.open("w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    for attendee_id, sched in assignments.items():
+        info = attendee_info[attendee_id]
+        writer.writerow([info["Name"]])
+        writer.writerow([info["Grade"], info["Teacher"]])
+        writer.writerow([])
+        writer.writerow(["Period", "Session"])
         for p in TIME_SLOTS:
-            f.write(f"{p},{sched[p] or ''}\n")
-        f.write("\n")
+            writer.writerow([p, sched[p] or ""])
+        writer.writerow([])
 
 # 5c.  Per-session rosters
-with OUT_SESSION_CSV.open("w", newline="") as f:
-    f.write("Session,Period,Students\n")
+with OUT_SESSION_CSV.open("w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["Session", "Period", "Students"])
     for session in sessions_df["Session"]:
         for p in TIME_SLOTS:
-            kids = [s for s, sc in assignments.items() if sc[p] == session]
-            f.write(f"{session},{p},\"{'; '.join(kids)}\"\n")
+            kids = [attendee_info[s]["Name"] for s, sc in assignments.items() if sc[p] == session]
+            writer.writerow([session, p, "; ".join(kids)])
 
 # 5d.  Wait-lists
-with OUT_WAITLIST_CSV.open("w", newline="") as f:
-    f.write("Session,Student,PreferenceRank\n")
+with OUT_WAITLIST_CSV.open("w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["Session", "Student", "PreferenceRank"])
     for session, ppl in wait_lists.items():
-        for name, rank in ppl:
-            f.write(f"{session},{name},{rank}\n")
+        for attendee_id, rank in ppl:
+            writer.writerow([session, attendee_info[attendee_id]["Name"], rank])
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -291,7 +314,7 @@ for idx, (name, sched) in enumerate(assignments.items()):
     y = TOP_MARGIN  + row * CARD_H
 
     pdf.draw_card(
-        name=name,
+        name=attendee_info[name]["Name"],
         grade=attendee_info[name]["Grade"],
         teacher=attendee_info[name]["Teacher"],
         sched=sched,

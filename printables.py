@@ -42,18 +42,21 @@ default_times = {
 }
 TIME_BLOCKS = {f"period{i}": default_times.get(i, f"P{i}") for i in range(1, NUM_PERIODS + 1)}
 
-# Build assignments + attendee info dictionaries
-assignments = {
-    row["Name"]: {
+# Build assignments + attendee info dictionaries. Use row-based internal IDs so
+# duplicate student names survive a manually-edited attendee_schedule.csv.
+assignments = {}
+attendee_info = {}
+for row_idx, row in sched_df.iterrows():
+    attendee_id = f"row-{row_idx + 1}"
+    assignments[attendee_id] = {
         f"period{i}": row[period_col[i]] if pd.notna(row[period_col[i]]) else ""
         for i in range(1, NUM_PERIODS + 1)
     }
-    for _, row in sched_df.iterrows()
-}
-attendee_info = {
-    row["Name"]: {"Grade": row["Grade"], "Teacher": row["Teacher"]}
-    for _, row in sched_df.iterrows()
-}
+    attendee_info[attendee_id] = {
+        "Name": row["Name"],
+        "Grade": row["Grade"],
+        "Teacher": row["Teacher"],
+    }
 
 # ───────────────────────── 2.  Load room data ─────────────────────────────
 rooms_df = pd.read_csv(ROOMS_CSV).rename(columns=lambda c: c.strip())
@@ -108,7 +111,7 @@ class CardsPDF(FPDF):
 cards_pdf = CardsPDF(orientation="P", unit="mm", format="Letter")
 cards_pdf.set_auto_page_break(False)
 
-for idx, (name, sched) in enumerate(assignments.items()):
+for idx, (attendee_id, sched) in enumerate(assignments.items()):
     if idx % 8 == 0:
         cards_pdf.add_page()
     row = idx % 4
@@ -117,9 +120,9 @@ for idx, (name, sched) in enumerate(assignments.items()):
     y = TOP_MARGIN  + row * CARD_H
     cards_pdf.card(
         x0=x, y0=y,
-        name=name,
-        grade=attendee_info[name]["Grade"],
-        teacher=attendee_info[name]["Teacher"],
+        name=attendee_info[attendee_id]["Name"],
+        grade=attendee_info[attendee_id]["Grade"],
+        teacher=attendee_info[attendee_id]["Teacher"],
         schedule=sched
     )
 
@@ -135,12 +138,12 @@ col_w = 37 if NUM_PERIODS == 7 else 44  # 7×37=259mm ; 6×44=264mm (fits 279mm)
 
 # Build {session: {period: [names]}}
 session_roster = {}
-for name, schedule in assignments.items():
+for attendee_id, schedule in assignments.items():
     for p, sess in schedule.items():
         if not sess:
             continue
         session_roster.setdefault(sess, {ts: [] for ts in TIME_SLOTS})
-        session_roster[sess][p].append(name)
+        session_roster[sess][p].append(attendee_info[attendee_id]["Name"])
 
 for sess, p_dict in session_roster.items():
     roster_pdf.add_page()
