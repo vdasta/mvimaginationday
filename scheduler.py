@@ -9,9 +9,20 @@ from imagination_day import (
     ConfigError,
     GoogleSheetsClient,
     OUTPUT_TABS,
+    TAB_CATALOG,
+    TAB_DRAFT,
+    TAB_FINAL,
+    TAB_GAPS,
+    TAB_INSTRUCTIONS,
+    TAB_ROSTERS,
+    TAB_RUN_STATUS,
+    TAB_TEACHER,
+    TAB_VALIDATION,
+    TAB_WAITLIST,
     build_catalog_snapshot_rows,
     build_gap_rows,
     build_generated_schedule_rows,
+    build_instruction_rows,
     build_run_summary_rows,
     build_session_roster_rows,
     build_teacher_view_rows,
@@ -104,14 +115,15 @@ def write_validation_outputs(
     issues: list[ValidationIssue],
     summary_rows: list[list[str]],
 ) -> None:
-    client.clear_and_write_tab(output_workbook_url, "Validation Errors", build_validation_rows(issues))
+    client.clear_and_write_tab(output_workbook_url, TAB_INSTRUCTIONS, build_instruction_rows())
+    client.clear_and_write_tab(output_workbook_url, TAB_VALIDATION, build_validation_rows(issues))
     if sessions and time_slots:
         client.clear_and_write_tab(
             output_workbook_url,
-            "Catalog Snapshot",
+            TAB_CATALOG,
             build_catalog_snapshot_rows(sessions, time_slots),
         )
-    client.clear_and_write_tab(output_workbook_url, "Run Summary", summary_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_RUN_STATUS, summary_rows)
 
 
 def fatal_issue_count(issues: list[ValidationIssue]) -> int:
@@ -163,7 +175,7 @@ def command_run(config_path: Path) -> int:
         )
         write_validation_outputs(client, output_workbook_url, sessions, time_slots, issues, summary_rows)
         print(f"Run stopped because validation found {fatal_count} fatal issue(s).")
-        print(f"See Validation Errors in {output_workbook_url}")
+        print(f"See {TAB_VALIDATION} in {output_workbook_url}")
         return 1
 
     assignments, wait_lists = assign_attendees(attendees, sessions, time_slots)
@@ -174,8 +186,8 @@ def command_run(config_path: Path) -> int:
     teacher_rows = build_teacher_view_rows(attendees, assignments, time_slots)
 
     final_schedule_seeded = False
-    if not client.tab_has_data(output_workbook_url, "Final Schedule"):
-        client.clear_and_write_tab(output_workbook_url, "Final Schedule", generated_rows)
+    if not client.tab_has_data(output_workbook_url, TAB_FINAL):
+        client.clear_and_write_tab(output_workbook_url, TAB_FINAL, generated_rows)
         final_schedule_seeded = True
 
     summary_rows = build_run_summary_rows(
@@ -191,20 +203,21 @@ def command_run(config_path: Path) -> int:
         command_name="run",
     )
 
-    client.clear_and_write_tab(output_workbook_url, "Validation Errors", build_validation_rows(issues))
-    client.clear_and_write_tab(output_workbook_url, "Generated Schedule", generated_rows)
-    client.clear_and_write_tab(output_workbook_url, "Wait List", waitlist_rows)
-    client.clear_and_write_tab(output_workbook_url, "Gaps", gap_rows)
-    client.clear_and_write_tab(output_workbook_url, "Session Rosters", roster_rows)
-    client.clear_and_write_tab(output_workbook_url, "Teacher View", teacher_rows)
-    client.clear_and_write_tab(output_workbook_url, "Catalog Snapshot", build_catalog_snapshot_rows(sessions, time_slots))
-    client.clear_and_write_tab(output_workbook_url, "Run Summary", summary_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_INSTRUCTIONS, build_instruction_rows())
+    client.clear_and_write_tab(output_workbook_url, TAB_VALIDATION, build_validation_rows(issues))
+    client.clear_and_write_tab(output_workbook_url, TAB_DRAFT, generated_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_WAITLIST, waitlist_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_GAPS, gap_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_ROSTERS, roster_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_TEACHER, teacher_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_CATALOG, build_catalog_snapshot_rows(sessions, time_slots))
+    client.clear_and_write_tab(output_workbook_url, TAB_RUN_STATUS, summary_rows)
 
     print(f"Draft schedule written to {output_workbook_url}")
     if final_schedule_seeded:
-        print("Final Schedule was empty, so it was seeded from Generated Schedule.")
+        print(f"{TAB_FINAL} was empty, so it was seeded automatically from {TAB_DRAFT}.")
     else:
-        print("Final Schedule already contained data and was left unchanged.")
+        print(f"{TAB_FINAL} already contained data and was left unchanged.")
     return 0
 
 
@@ -239,9 +252,9 @@ def command_printables(config_path: Path, output_dir_override: str | None) -> in
 
     catalog_rows = client.read_range(config["catalog_url"], config["catalog_tab"], "A:ZZ")
     sessions, time_slots, catalog_issues = parse_catalog(catalog_rows)
-    final_rows = client.read_range(output_workbook_url, "Final Schedule", "A:ZZ")
+    final_rows = client.read_range(output_workbook_url, TAB_FINAL, "A:ZZ")
     if len(final_rows) <= 1:
-        print("Final Schedule is empty. Run `python scheduler.py run` and edit the Final Schedule tab first.")
+        print(f"{TAB_FINAL} is empty. Run `python scheduler.py run` and edit that tab first.")
         return 1
 
     attendees, assignments, final_time_slots = parse_schedule_rows(final_rows)
@@ -263,13 +276,14 @@ def command_printables(config_path: Path, output_dir_override: str | None) -> in
 
     if fatal_count:
         print(f"Printable generation stopped because validation found {fatal_count} fatal issue(s).")
-        print(f"See Validation Errors in {output_workbook_url}")
+        print(f"See {TAB_VALIDATION} in {output_workbook_url}")
         return 1
 
     roster_rows = build_session_roster_rows(attendees, assignments, sessions, final_time_slots)
     teacher_rows = build_teacher_view_rows(attendees, assignments, final_time_slots)
-    client.clear_and_write_tab(output_workbook_url, "Session Rosters", roster_rows)
-    client.clear_and_write_tab(output_workbook_url, "Teacher View", teacher_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_INSTRUCTIONS, build_instruction_rows())
+    client.clear_and_write_tab(output_workbook_url, TAB_ROSTERS, roster_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_TEACHER, teacher_rows)
 
     output_dir = Path(output_dir_override or config["pdf_output_dir"]).expanduser()
     cards_pdf, rosters_pdf = generate_pdf_outputs(

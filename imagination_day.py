@@ -35,16 +35,28 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
 }
 
+TAB_INSTRUCTIONS = "1 Instructions"
+TAB_RUN_STATUS = "2 Run Status"
+TAB_VALIDATION = "3 Validation Issues"
+TAB_DRAFT = "4 Draft Schedule (Do Not Edit)"
+TAB_FINAL = "5 Final Schedule (Edit Here)"
+TAB_WAITLIST = "6 Waitlist"
+TAB_GAPS = "7 Students With Gaps"
+TAB_ROSTERS = "8 Session Rosters"
+TAB_TEACHER = "9 Teacher View"
+TAB_CATALOG = "10 Catalog Snapshot"
+
 OUTPUT_TABS = [
-    "Run Summary",
-    "Validation Errors",
-    "Generated Schedule",
-    "Final Schedule",
-    "Wait List",
-    "Gaps",
-    "Session Rosters",
-    "Teacher View",
-    "Catalog Snapshot",
+    TAB_INSTRUCTIONS,
+    TAB_RUN_STATUS,
+    TAB_VALIDATION,
+    TAB_DRAFT,
+    TAB_FINAL,
+    TAB_WAITLIST,
+    TAB_GAPS,
+    TAB_ROSTERS,
+    TAB_TEACHER,
+    TAB_CATALOG,
 ]
 
 GRADE_ORDER = {"4th": 0, "3rd": 1, "2nd": 2, "1st": 3, "K": 4}
@@ -733,6 +745,20 @@ def build_validation_rows(issues: list[ValidationIssue]) -> list[list[str]]:
     return rows
 
 
+def build_instruction_rows() -> list[list[str]]:
+    return [
+        ["Imagination Day Workbook", "What to do"],
+        ["Step 1", f"Open '{TAB_VALIDATION}'. Fix every row marked ERROR before running the schedule."],
+        ["Step 2", "Run `python scheduler.py run` to refresh the draft workbook tabs."],
+        ["Step 3", f"Review '{TAB_DRAFT}'. This tab is overwritten on each run and should not be edited by hand."],
+        ["Step 4", f"Open '{TAB_FINAL}'. This is the only schedule tab that teachers should edit."],
+        ["Step 5", f"There is no copy/paste step on first run. If '{TAB_FINAL}' was empty, the script already copied the draft into it for you."],
+        ["Step 6", f"After teacher edits are complete, run `python scheduler.py printables`. PDFs are built from '{TAB_FINAL}'."],
+        ["Reference", f"Use '{TAB_WAITLIST}', '{TAB_GAPS}', and '{TAB_ROSTERS}' as supporting reports while reviewing the schedule."],
+        ["Important", f"Running the scheduler again updates '{TAB_DRAFT}' but leaves '{TAB_FINAL}' alone once it already has data."],
+    ]
+
+
 def build_catalog_snapshot_rows(
     sessions: dict[str, SessionOffering],
     time_slots: list[str],
@@ -770,6 +796,9 @@ def build_run_summary_rows(
             ["Student Source", student_source_title],
             ["Catalog Source", catalog_source_title],
             ["Output Workbook", output_workbook_url],
+            ["Review Draft Tab", TAB_DRAFT],
+            ["Edit Final Tab", TAB_FINAL],
+            ["Validation Tab", TAB_VALIDATION],
             ["Student Count", str(attendee_count)],
             ["Validation Issue Count", str(issue_count)],
             ["Fatal Issue Count", str(fatal_issue_count)],

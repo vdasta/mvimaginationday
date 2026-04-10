@@ -50,7 +50,7 @@ Generate the draft schedule into the output workbook:
 python scheduler.py run
 ```
 
-Generate the final PDFs from the `Final Schedule` tab:
+Generate the final PDFs from the `5 Final Schedule (Edit Here)` tab:
 
 ```bash
 python scheduler.py printables
@@ -65,27 +65,29 @@ python printables.py
 ## Workflow
 
 1. Run `python scheduler.py validate`.
-2. Fix any fatal issues shown in the `Validation Errors` tab.
+2. Fix every `ERROR` listed in `3 Validation Issues`.
 3. Run `python scheduler.py run`.
-4. Review `Generated Schedule`.
-5. If `Final Schedule` was empty, the script will seed it once from `Generated Schedule`.
-6. Teachers manually edit `Final Schedule`.
-7. Run `python scheduler.py printables`.
+4. Review `4 Draft Schedule (Do Not Edit)`.
+5. Open `5 Final Schedule (Edit Here)`.
+6. If that tab was empty, the script already copied the draft into it for you. No copy/paste step is required.
+7. Teachers edit only `5 Final Schedule (Edit Here)`.
+8. Run `python scheduler.py printables`.
 
 ## Output Workbook Tabs
 
-- `Run Summary`
-- `Validation Errors`
-- `Generated Schedule`
-- `Final Schedule`
-- `Wait List`
-- `Gaps`
-- `Session Rosters`
-- `Teacher View`
-- `Catalog Snapshot`
+- `1 Instructions`
+- `2 Run Status`
+- `3 Validation Issues`
+- `4 Draft Schedule (Do Not Edit)`
+- `5 Final Schedule (Edit Here)`
+- `6 Waitlist`
+- `7 Students With Gaps`
+- `8 Session Rosters`
+- `9 Teacher View`
+- `10 Catalog Snapshot`
 
 ## Notes
 
-- `Final Schedule` is not overwritten once it already contains data.
-- PDFs are generated from `Final Schedule`, not `Generated Schedule`.
+- `5 Final Schedule (Edit Here)` is not overwritten once it already contains data.
+- PDFs are generated from `5 Final Schedule (Edit Here)`, not from `4 Draft Schedule (Do Not Edit)`.
 - The script stores Google OAuth tokens in `token.json` after the first successful login.
