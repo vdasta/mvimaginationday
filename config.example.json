@@ -14,6 +14,13 @@
     "Tie Dye (1st-4th)": "Tie Dye",
     "Yoga Storytelling (K-2nd)": "Hip Hop"
   },
+  "grade_lunch_assignments": {
+    "K": "Lunch1",
+    "1st": "Lunch1",
+    "2nd": "Lunch1",
+    "3rd": "Lunch2",
+    "4th": "Lunch2"
+  },
   "time_blocks": {
     "period1": "8:45-9:20",
     "period2": "9:25-10:00",

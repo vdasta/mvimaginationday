@@ -34,6 +34,7 @@ python scheduler.py init-config
 
 5. Optional:
 - update `session_aliases` if student choices do not exactly match catalog session names
+- set `grade_lunch_assignments` so each grade is assigned the correct lunch session automatically
 - update `time_blocks` if the schedule changes
 
 ## Commands
@@ -70,8 +71,9 @@ python printables.py
 4. Review `4 Draft Schedule (Do Not Edit)`.
 5. Open `5 Final Schedule (Edit Here)`.
 6. If that tab was empty, the script already copied the draft into it for you. No copy/paste step is required.
-7. Teachers edit only `5 Final Schedule (Edit Here)`.
-8. Run `python scheduler.py printables`.
+7. Lunch is assigned automatically by grade from config and should already be present in the draft.
+8. Teachers edit only `5 Final Schedule (Edit Here)`.
+9. Run `python scheduler.py printables`.
 
 ## Output Workbook Tabs
 
@@ -90,4 +92,5 @@ python printables.py
 
 - `5 Final Schedule (Edit Here)` is not overwritten once it already contains data.
 - PDFs are generated from `5 Final Schedule (Edit Here)`, not from `4 Draft Schedule (Do Not Edit)`.
+- Lunch is assigned automatically from `grade_lunch_assignments` in config before other class preferences are scheduled.
 - The script stores Google OAuth tokens in `token.json` after the first successful login.

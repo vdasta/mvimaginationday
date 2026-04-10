@@ -24,6 +24,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "token_file": "token.json",
     "pdf_output_dir": ".",
     "session_aliases": {},
+    "grade_lunch_assignments": {},
     "time_blocks": {
         "period1": "8:45-9:20",
         "period2": "9:25-10:00",
@@ -58,6 +59,8 @@ OUTPUT_TABS = [
     TAB_TEACHER,
     TAB_CATALOG,
 ]
+UNPROTECTED_OUTPUT_TABS = {TAB_FINAL}
+PROTECTION_DESCRIPTION_PREFIX = "Managed by Imagination Day Scheduler"
 
 GRADE_ORDER = {"4th": 0, "3rd": 1, "2nd": 2, "1st": 3, "K": 4}
 PERIOD_RE = re.compile(r"period\s*(\d+)", flags=re.I)
@@ -111,6 +114,11 @@ def load_config(config_path: Path) -> dict[str, Any]:
     config.update(data)
     config["time_blocks"] = dict(DEFAULT_CONFIG["time_blocks"]) | dict(data.get("time_blocks", {}))
     config["session_aliases"] = dict(data.get("session_aliases", {}))
+    config["grade_lunch_assignments"] = {
+        normalize_text(grade): normalize_text(session_name)
+        for grade, session_name in dict(data.get("grade_lunch_assignments", {})).items()
+        if normalize_text(grade) and normalize_text(session_name)
+    }
 
     for key in ("student_responses_url", "catalog_url"):
         if not config.get(key):
@@ -172,6 +180,19 @@ def canonical_session_name(raw_name: Any, alias_lookup: dict[str, str]) -> str:
     if not cleaned:
         return ""
     return alias_lookup.get(normalize_key(cleaned), cleaned)
+
+
+def canonical_grade_lunch_assignments(config: dict[str, Any]) -> dict[str, str]:
+    alias_lookup = build_alias_lookup(config)
+    return {
+        normalize_text(grade): canonical_session_name(session_name, alias_lookup)
+        for grade, session_name in config.get("grade_lunch_assignments", {}).items()
+        if normalize_text(grade) and normalize_text(session_name)
+    }
+
+
+def lunch_sessions_in_use(grade_lunch_assignments: dict[str, str]) -> set[str]:
+    return {session_name for session_name in grade_lunch_assignments.values() if session_name}
 
 
 class GoogleSheetsClient:
@@ -328,6 +349,73 @@ class GoogleSheetsClient:
             .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
             .execute()
         )
+
+    def sync_output_tab_protections(self, spreadsheet_ref: str) -> None:
+        spreadsheet_id = spreadsheet_id_from_ref(spreadsheet_ref)
+        metadata = self.get_metadata(spreadsheet_id)
+
+        sheet_map = {
+            sheet["properties"]["title"]: sheet["properties"]["sheetId"]
+            for sheet in metadata.get("sheets", [])
+        }
+
+        requests: list[dict[str, Any]] = []
+        managed_protections_by_title: dict[str, list[int]] = defaultdict(list)
+
+        for sheet in metadata.get("sheets", []):
+            title = sheet["properties"]["title"]
+            for protected_range in sheet.get("protectedRanges", []):
+                description = protected_range.get("description", "")
+                if description.startswith(PROTECTION_DESCRIPTION_PREFIX):
+                    managed_protections_by_title[title].append(protected_range["protectedRangeId"])
+
+        for tab_title in OUTPUT_TABS:
+            if tab_title not in sheet_map:
+                continue
+
+            existing_ids = managed_protections_by_title.get(tab_title, [])
+            should_be_protected = tab_title not in UNPROTECTED_OUTPUT_TABS
+
+            if should_be_protected:
+                if existing_ids:
+                    for protection_id in existing_ids:
+                        requests.append(
+                            {
+                                "updateProtectedRange": {
+                                    "protectedRange": {
+                                        "protectedRangeId": protection_id,
+                                        "description": f"{PROTECTION_DESCRIPTION_PREFIX}: {tab_title}",
+                                        "warningOnly": False,
+                                        "range": {"sheetId": sheet_map[tab_title]},
+                                    },
+                                    "fields": "description,warningOnly,range",
+                                }
+                            }
+                        )
+                else:
+                    requests.append(
+                        {
+                            "addProtectedRange": {
+                                "protectedRange": {
+                                    "description": f"{PROTECTION_DESCRIPTION_PREFIX}: {tab_title}",
+                                    "warningOnly": False,
+                                    "range": {"sheetId": sheet_map[tab_title]},
+                                }
+                            }
+                        }
+                    )
+            else:
+                for protection_id in existing_ids:
+                    requests.append(
+                        {"deleteProtectedRange": {"protectedRangeId": protection_id}}
+                    )
+
+        if requests:
+            (
+                self.service.spreadsheets()
+                .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
+                .execute()
+            )
 
 
 def ensure_output_workbook(
@@ -603,9 +691,13 @@ def validate_data(
     attendees: list[Attendee],
     sessions: dict[str, SessionOffering],
     prior_issues: list[ValidationIssue],
+    config: dict[str, Any],
 ) -> list[ValidationIssue]:
     issues = list(prior_issues)
     known_sessions = {normalize_key(name): name for name in sessions}
+    lunch_assignments = canonical_grade_lunch_assignments(config)
+    lunch_sessions = lunch_sessions_in_use(lunch_assignments)
+    grade_counts = Counter(normalize_text(attendee.grade) for attendee in attendees)
 
     for attendee in attendees:
         for choice in attendee.choices:
@@ -618,6 +710,90 @@ def validate_data(
                         f"Choice '{choice}' does not exist in the catalog.",
                     )
                 )
+
+    if attendees and not lunch_assignments:
+        issues.append(
+            ValidationIssue(
+                "ERROR",
+                "lunch_config",
+                "grade_lunch_assignments",
+                "Config is missing grade lunch assignments. Add a lunch session for each grade.",
+            )
+        )
+
+    for grade in sorted(grade_counts):
+        lunch_session = lunch_assignments.get(grade)
+        if not lunch_session:
+            issues.append(
+                ValidationIssue(
+                    "ERROR",
+                    "lunch_config",
+                    grade,
+                    "This grade does not have a configured lunch session.",
+                )
+            )
+            continue
+
+        if lunch_session not in sessions:
+            issues.append(
+                ValidationIssue(
+                    "ERROR",
+                    "lunch_config",
+                    grade,
+                    f"Lunch session '{lunch_session}' does not exist in the catalog.",
+                )
+            )
+            continue
+
+        lunch_periods = [
+            period
+            for period, capacity in sessions[lunch_session].capacities.items()
+            if capacity > 0
+        ]
+        if not lunch_periods:
+            issues.append(
+                ValidationIssue(
+                    "ERROR",
+                    "lunch_capacity",
+                    lunch_session,
+                    "Lunch session has no available period in the catalog.",
+                )
+            )
+        elif len(lunch_periods) > 1:
+            issues.append(
+                ValidationIssue(
+                    "ERROR",
+                    "lunch_capacity",
+                    lunch_session,
+                    f"Lunch session should have exactly one active period, but found {', '.join(display_period(period) for period in lunch_periods)}.",
+                )
+            )
+
+    lunch_headcount_by_session = Counter(
+        lunch_session
+        for grade, lunch_session in lunch_assignments.items()
+        if grade_counts.get(grade)
+    )
+    for lunch_session, assigned_grade_count in list(lunch_headcount_by_session.items()):
+        lunch_headcount_by_session[lunch_session] = sum(
+            grade_counts[grade]
+            for grade, session_name in lunch_assignments.items()
+            if session_name == lunch_session
+        )
+
+    for lunch_session, required_students in sorted(lunch_headcount_by_session.items()):
+        if lunch_session not in sessions:
+            continue
+        total_capacity = sum(sessions[lunch_session].capacities.values())
+        if total_capacity < required_students:
+            issues.append(
+                ValidationIssue(
+                    "ERROR",
+                    "lunch_capacity",
+                    lunch_session,
+                    f"Lunch session capacity is {total_capacity}, but {required_students} students are assigned to it by grade config.",
+                )
+            )
 
     return sorted(
         issues,
@@ -649,13 +825,15 @@ def assign_attendees(
     attendees: list[Attendee],
     sessions: dict[str, SessionOffering],
     time_slots: list[str],
+    config: dict[str, Any],
 ) -> tuple[dict[str, dict[str, str]], dict[str, list[tuple[str, int]]]]:
     capacities = {
         name: dict(session.capacities)
         for name, session in sessions.items()
     }
     totals = session_capacity_totals(sessions)
-    attendee_map = {attendee.attendee_id: attendee for attendee in attendees}
+    lunch_assignments = canonical_grade_lunch_assignments(config)
+    lunch_sessions = lunch_sessions_in_use(lunch_assignments)
 
     sorted_attendees = sorted(
         attendees,
@@ -675,7 +853,28 @@ def assign_attendees(
 
     for attendee in sorted_attendees:
         taken_periods: set[str] = set()
-        for rank, session_name in enumerate(attendee.choices, start=1):
+        lunch_session = lunch_assignments.get(normalize_text(attendee.grade), "")
+        if lunch_session:
+            lunch_open_periods = {
+                period: remaining
+                for period, remaining in capacities[lunch_session].items()
+                if remaining > 0 and period not in taken_periods
+            }
+            if lunch_open_periods:
+                lunch_period = max(lunch_open_periods, key=lunch_open_periods.get)
+                assignments[attendee.attendee_id][lunch_period] = lunch_session
+                capacities[lunch_session][lunch_period] -= 1
+                taken_periods.add(lunch_period)
+            else:
+                wait_lists[lunch_session].append((attendee.attendee_id, 0))
+
+        ranked_choices = [
+            session_name
+            for session_name in attendee.choices
+            if session_name not in lunch_sessions
+        ]
+
+        for rank, session_name in enumerate(ranked_choices, start=1):
             open_periods = {
                 period: remaining
                 for period, remaining in capacities[session_name].items()
@@ -720,7 +919,8 @@ def build_waitlist_rows(
     for session_name in sorted(wait_lists):
         for attendee_id, rank in wait_lists[session_name]:
             attendee = attendee_map[attendee_id]
-            rows.append([session_name, attendee.name, attendee.grade, attendee.teacher, str(rank)])
+            display_rank = "Required lunch" if rank == 0 else str(rank)
+            rows.append([session_name, attendee.name, attendee.grade, attendee.teacher, display_rank])
     return rows
 
 
@@ -753,7 +953,8 @@ def build_instruction_rows() -> list[list[str]]:
         ["Step 3", f"Review '{TAB_DRAFT}'. This tab is overwritten on each run and should not be edited by hand."],
         ["Step 4", f"Open '{TAB_FINAL}'. This is the only schedule tab that teachers should edit."],
         ["Step 5", f"There is no copy/paste step on first run. If '{TAB_FINAL}' was empty, the script already copied the draft into it for you."],
-        ["Step 6", f"After teacher edits are complete, run `python scheduler.py printables`. PDFs are built from '{TAB_FINAL}'."],
+        ["Step 6", "Lunch is assigned automatically by grade from config. Teachers do not need to add lunch by hand unless they are intentionally changing a student's final schedule."],
+        ["Step 7", f"After teacher edits are complete, run `python scheduler.py printables`. PDFs are built from '{TAB_FINAL}'."],
         ["Reference", f"Use '{TAB_WAITLIST}', '{TAB_GAPS}', and '{TAB_ROSTERS}' as supporting reports while reviewing the schedule."],
         ["Important", f"Running the scheduler again updates '{TAB_DRAFT}' but leaves '{TAB_FINAL}' alone once it already has data."],
     ]
@@ -786,6 +987,7 @@ def build_run_summary_rows(
     gap_count: int | None = None,
     waitlist_count: int | None = None,
     seeded_final_schedule: bool | None = None,
+    lunch_assignments_count: int | None = None,
     command_name: str,
 ) -> list[list[str]]:
     rows = [["Metric", "Value"]]
@@ -810,6 +1012,8 @@ def build_run_summary_rows(
         rows.append(["Waitlist Entries", str(waitlist_count)])
     if seeded_final_schedule is not None:
         rows.append(["Final Schedule Seeded", "yes" if seeded_final_schedule else "no"])
+    if lunch_assignments_count is not None:
+        rows.append(["Grades With Lunch Config", str(lunch_assignments_count)])
     return rows
 
 

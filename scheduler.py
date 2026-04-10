@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from imagination_day import (
+    canonical_grade_lunch_assignments,
     ConfigError,
     GoogleSheetsClient,
     OUTPUT_TABS,
@@ -100,7 +101,7 @@ def load_source_data(client: GoogleSheetsClient, config: dict) -> tuple:
 
     attendees, attendee_issues = parse_attendees(student_rows, config)
     sessions, time_slots, catalog_issues = parse_catalog(catalog_rows)
-    issues = validate_data(attendees, sessions, attendee_issues + catalog_issues)
+    issues = validate_data(attendees, sessions, attendee_issues + catalog_issues, config)
 
     student_meta = client.get_metadata(config["student_responses_url"])
     catalog_meta = client.get_metadata(config["catalog_url"])
@@ -124,10 +125,15 @@ def write_validation_outputs(
             build_catalog_snapshot_rows(sessions, time_slots),
         )
     client.clear_and_write_tab(output_workbook_url, TAB_RUN_STATUS, summary_rows)
+    client.sync_output_tab_protections(output_workbook_url)
 
 
 def fatal_issue_count(issues: list[ValidationIssue]) -> int:
     return sum(1 for issue in issues if issue.is_fatal)
+
+
+def read_tab_rows(client: GoogleSheetsClient, workbook_url: str, tab_title: str) -> list[list[str]]:
+    return client.read_range(workbook_url, tab_title, "A:ZZ")
 
 
 def command_validate(config_path: Path) -> int:
@@ -145,6 +151,7 @@ def command_validate(config_path: Path) -> int:
         attendee_count=len(attendees),
         issue_count=len(issues),
         fatal_issue_count=fatal_count,
+        lunch_assignments_count=len(canonical_grade_lunch_assignments(config)),
         command_name="validate",
     )
     write_validation_outputs(client, output_workbook_url, sessions, time_slots, issues, summary_rows)
@@ -159,6 +166,8 @@ def command_run(config_path: Path) -> int:
     client = GoogleSheetsClient(config["credentials_file"], config["token_file"])
     output_workbook_url = ensure_output_workbook(client, config, config_path)
     client.ensure_tabs(output_workbook_url, OUTPUT_TABS)
+    existing_draft_rows = read_tab_rows(client, output_workbook_url, TAB_DRAFT)
+    existing_final_rows = read_tab_rows(client, output_workbook_url, TAB_FINAL)
 
     attendees, sessions, time_slots, issues, student_meta, catalog_meta = load_source_data(client, config)
     fatal_count = fatal_issue_count(issues)
@@ -171,6 +180,7 @@ def command_run(config_path: Path) -> int:
             attendee_count=len(attendees),
             issue_count=len(issues),
             fatal_issue_count=fatal_count,
+            lunch_assignments_count=len(canonical_grade_lunch_assignments(config)),
             command_name="run",
         )
         write_validation_outputs(client, output_workbook_url, sessions, time_slots, issues, summary_rows)
@@ -178,7 +188,7 @@ def command_run(config_path: Path) -> int:
         print(f"See {TAB_VALIDATION} in {output_workbook_url}")
         return 1
 
-    assignments, wait_lists = assign_attendees(attendees, sessions, time_slots)
+    assignments, wait_lists = assign_attendees(attendees, sessions, time_slots, config)
     generated_rows = build_generated_schedule_rows(attendees, assignments, time_slots)
     waitlist_rows = build_waitlist_rows(wait_lists, attendees)
     gap_rows = build_gap_rows(attendees, assignments, time_slots)
@@ -186,9 +196,13 @@ def command_run(config_path: Path) -> int:
     teacher_rows = build_teacher_view_rows(attendees, assignments, time_slots)
 
     final_schedule_seeded = False
-    if not client.tab_has_data(output_workbook_url, TAB_FINAL):
+    final_schedule_refreshed = False
+    if not existing_final_rows or len(existing_final_rows) <= 1:
         client.clear_and_write_tab(output_workbook_url, TAB_FINAL, generated_rows)
         final_schedule_seeded = True
+    elif existing_draft_rows and existing_final_rows == existing_draft_rows:
+        client.clear_and_write_tab(output_workbook_url, TAB_FINAL, generated_rows)
+        final_schedule_refreshed = True
 
     summary_rows = build_run_summary_rows(
         student_source_title=student_meta["properties"]["title"],
@@ -200,6 +214,7 @@ def command_run(config_path: Path) -> int:
         gap_count=max(len(gap_rows) - 1, 0),
         waitlist_count=max(len(waitlist_rows) - 1, 0),
         seeded_final_schedule=final_schedule_seeded,
+        lunch_assignments_count=len(canonical_grade_lunch_assignments(config)),
         command_name="run",
     )
 
@@ -212,10 +227,13 @@ def command_run(config_path: Path) -> int:
     client.clear_and_write_tab(output_workbook_url, TAB_TEACHER, teacher_rows)
     client.clear_and_write_tab(output_workbook_url, TAB_CATALOG, build_catalog_snapshot_rows(sessions, time_slots))
     client.clear_and_write_tab(output_workbook_url, TAB_RUN_STATUS, summary_rows)
+    client.sync_output_tab_protections(output_workbook_url)
 
     print(f"Draft schedule written to {output_workbook_url}")
     if final_schedule_seeded:
         print(f"{TAB_FINAL} was empty, so it was seeded automatically from {TAB_DRAFT}.")
+    elif final_schedule_refreshed:
+        print(f"{TAB_FINAL} matched the previous draft, so it was refreshed automatically.")
     else:
         print(f"{TAB_FINAL} already contained data and was left unchanged.")
     return 0
@@ -225,20 +243,39 @@ def validate_final_schedule(
     attendees,
     assignments,
     sessions,
+    config,
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     known_sessions = set(sessions)
     attendee_map = {attendee.attendee_id: attendee for attendee in attendees}
+    lunch_assignments = canonical_grade_lunch_assignments(config)
 
     for attendee_id, schedule in assignments.items():
+        attendee = attendee_map[attendee_id]
         for period, session_name in schedule.items():
             if session_name and session_name not in known_sessions:
                 issues.append(
                     ValidationIssue(
                         "ERROR",
                         "final_schedule_session",
-                        attendee_map[attendee_id].name,
+                        attendee.name,
                         f"{period} references '{session_name}', which is not in the catalog.",
+                    )
+                )
+
+        expected_lunch = lunch_assignments.get(attendee.grade)
+        if expected_lunch:
+            lunch_periods = [
+                period for period, session_name in schedule.items()
+                if session_name == expected_lunch
+            ]
+            if not lunch_periods:
+                issues.append(
+                    ValidationIssue(
+                        "ERROR",
+                        "final_schedule_lunch",
+                        attendee.name,
+                        f"{attendee.grade} students must include '{expected_lunch}' in the final schedule.",
                     )
                 )
     return issues
@@ -258,7 +295,7 @@ def command_printables(config_path: Path, output_dir_override: str | None) -> in
         return 1
 
     attendees, assignments, final_time_slots = parse_schedule_rows(final_rows)
-    issues = catalog_issues + validate_final_schedule(attendees, assignments, sessions)
+    issues = catalog_issues + validate_final_schedule(attendees, assignments, sessions, config)
     fatal_count = fatal_issue_count(issues)
 
     student_meta = client.get_metadata(config["student_responses_url"])
@@ -270,6 +307,7 @@ def command_printables(config_path: Path, output_dir_override: str | None) -> in
         attendee_count=len(attendees),
         issue_count=len(issues),
         fatal_issue_count=fatal_count,
+        lunch_assignments_count=len(canonical_grade_lunch_assignments(config)),
         command_name="printables",
     )
     write_validation_outputs(client, output_workbook_url, sessions, time_slots, issues, summary_rows)
@@ -284,6 +322,7 @@ def command_printables(config_path: Path, output_dir_override: str | None) -> in
     client.clear_and_write_tab(output_workbook_url, TAB_INSTRUCTIONS, build_instruction_rows())
     client.clear_and_write_tab(output_workbook_url, TAB_ROSTERS, roster_rows)
     client.clear_and_write_tab(output_workbook_url, TAB_TEACHER, teacher_rows)
+    client.sync_output_tab_protections(output_workbook_url)
 
     output_dir = Path(output_dir_override or config["pdf_output_dir"]).expanduser()
     cards_pdf, rosters_pdf = generate_pdf_outputs(
