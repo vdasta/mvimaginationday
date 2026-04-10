@@ -21,6 +21,7 @@ from imagination_day import (
     TAB_VALIDATION,
     TAB_WAITLIST,
     build_catalog_snapshot_rows,
+    build_final_waitlist_rows,
     build_gap_rows,
     build_generated_schedule_rows,
     build_instruction_rows,
@@ -53,10 +54,14 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate", help="Validate the source sheets and refresh validation tabs")
     subparsers.add_parser("run", help="Generate a draft schedule into the output workbook")
+    subparsers.add_parser(
+        "refresh-final",
+        help="Revalidate the edited Final Schedule and refresh final waitlist/gaps/rosters without generating PDFs",
+    )
 
     printables = subparsers.add_parser(
         "printables",
-        help="Generate PDFs from the Final Schedule tab and refresh final roster tabs",
+        help="Refresh final reports from the Final Schedule tab and generate PDFs",
     )
     printables.add_argument(
         "--output-dir",
@@ -281,7 +286,12 @@ def validate_final_schedule(
     return issues
 
 
-def command_printables(config_path: Path, output_dir_override: str | None) -> int:
+def refresh_final_outputs(
+    config_path: Path,
+    *,
+    output_dir_override: str | None,
+    generate_pdfs: bool,
+) -> int:
     config = load_config(config_path)
     client = GoogleSheetsClient(config["credentials_file"], config["token_file"])
     output_workbook_url = ensure_output_workbook(client, config, config_path)
@@ -289,13 +299,15 @@ def command_printables(config_path: Path, output_dir_override: str | None) -> in
 
     catalog_rows = client.read_range(config["catalog_url"], config["catalog_tab"], "A:ZZ")
     sessions, time_slots, catalog_issues = parse_catalog(catalog_rows)
+    student_rows = client.read_range(config["student_responses_url"], config["student_tab"], "A:ZZ")
+    source_attendees, attendee_issues = parse_attendees(student_rows, config)
     final_rows = client.read_range(output_workbook_url, TAB_FINAL, "A:ZZ")
     if len(final_rows) <= 1:
         print(f"{TAB_FINAL} is empty. Run `python scheduler.py run` and edit that tab first.")
         return 1
 
     attendees, assignments, final_time_slots = parse_schedule_rows(final_rows)
-    issues = catalog_issues + validate_final_schedule(attendees, assignments, sessions, config)
+    issues = catalog_issues + attendee_issues + validate_final_schedule(attendees, assignments, sessions, config)
     fatal_count = fatal_issue_count(issues)
 
     student_meta = client.get_metadata(config["student_responses_url"])
@@ -308,21 +320,30 @@ def command_printables(config_path: Path, output_dir_override: str | None) -> in
         issue_count=len(issues),
         fatal_issue_count=fatal_count,
         lunch_assignments_count=len(canonical_grade_lunch_assignments(config)),
-        command_name="printables",
+        command_name="printables" if generate_pdfs else "refresh-final",
     )
     write_validation_outputs(client, output_workbook_url, sessions, time_slots, issues, summary_rows)
 
     if fatal_count:
-        print(f"Printable generation stopped because validation found {fatal_count} fatal issue(s).")
+        action = "Printable generation" if generate_pdfs else "Final report refresh"
+        print(f"{action} stopped because validation found {fatal_count} fatal issue(s).")
         print(f"See {TAB_VALIDATION} in {output_workbook_url}")
         return 1
 
     roster_rows = build_session_roster_rows(attendees, assignments, sessions, final_time_slots)
     teacher_rows = build_teacher_view_rows(attendees, assignments, final_time_slots)
+    gap_rows = build_gap_rows(attendees, assignments, final_time_slots)
+    waitlist_rows = build_final_waitlist_rows(attendees, assignments, source_attendees)
     client.clear_and_write_tab(output_workbook_url, TAB_INSTRUCTIONS, build_instruction_rows())
+    client.clear_and_write_tab(output_workbook_url, TAB_WAITLIST, waitlist_rows)
+    client.clear_and_write_tab(output_workbook_url, TAB_GAPS, gap_rows)
     client.clear_and_write_tab(output_workbook_url, TAB_ROSTERS, roster_rows)
     client.clear_and_write_tab(output_workbook_url, TAB_TEACHER, teacher_rows)
     client.sync_output_tab_protections(output_workbook_url)
+
+    if not generate_pdfs:
+        print(f"Final reports refreshed in {output_workbook_url}")
+        return 0
 
     output_dir = Path(output_dir_override or config["pdf_output_dir"]).expanduser()
     cards_pdf, rosters_pdf = generate_pdf_outputs(
@@ -338,6 +359,22 @@ def command_printables(config_path: Path, output_dir_override: str | None) -> in
     return 0
 
 
+def command_refresh_final(config_path: Path) -> int:
+    return refresh_final_outputs(
+        config_path,
+        output_dir_override=None,
+        generate_pdfs=False,
+    )
+
+
+def command_printables(config_path: Path, output_dir_override: str | None) -> int:
+    return refresh_final_outputs(
+        config_path,
+        output_dir_override=output_dir_override,
+        generate_pdfs=True,
+    )
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -351,6 +388,8 @@ def main() -> int:
             return command_validate(config_path)
         if args.command == "run":
             return command_run(config_path)
+        if args.command == "refresh-final":
+            return command_refresh_final(config_path)
         if args.command == "printables":
             return command_printables(config_path, args.output_dir)
         parser.error(f"Unknown command: {args.command}")

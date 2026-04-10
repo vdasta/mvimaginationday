@@ -1,10 +1,25 @@
 # Imagination Day Scheduler
 
-Local Python workflow for generating an Imagination Day draft schedule from Google Sheets, handing off a teacher-editable final schedule in a separate workbook, and producing the final PDFs after manual edits.
+This project creates the Imagination Day schedule from two Google Sheets:
 
-## Setup
+- the student form responses
+- the course catalog
 
-1. Install dependencies:
+It writes the results into a separate output workbook, lets teachers make manual edits there, and then generates the final PDFs for student lanyards and class rosters.
+
+This is meant to be run locally on one computer by one volunteer.
+
+## What You Need
+
+- Python 3.10 or newer
+- access to the student response spreadsheet
+- access to the course catalog spreadsheet
+- a Google Cloud project with the Google Sheets API enabled
+- an OAuth desktop app downloaded as `credentials.json`
+
+## One-Time Setup
+
+### 1. Set up Python
 
 ```bash
 python3 -m venv .venv
@@ -12,9 +27,25 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-2. Create a Google OAuth desktop app and download `credentials.json` into the repo root.
+### 2. Set up Google access
 
-3. Create `config.json` from the example:
+Create a Google Cloud project and do all of the following:
+
+1. Enable the Google Sheets API.
+2. Configure the OAuth consent screen.
+3. Create an OAuth client of type `Desktop app`.
+4. Download the client JSON file.
+5. Save that file in this folder as `credentials.json`.
+
+Notes:
+
+- `credentials.json` should stay local. Do not commit it to git.
+- On the first successful run, the script will also create `token.json`.
+- `token.json` should also stay local. Do not commit it to git.
+
+### 3. Create the config file
+
+Copy the example:
 
 ```bash
 cp config.example.json config.json
@@ -26,56 +57,135 @@ Or generate a starter file:
 python scheduler.py init-config
 ```
 
-4. Fill in:
+### 4. Edit `config.json`
+
+Fill in these required values:
+
 - `student_responses_url`
 - `catalog_url`
-- `output_workbook_url`
-  - leave this as `null` on first run to auto-create the output workbook
 
-5. Optional:
-- update `session_aliases` if student choices do not exactly match catalog session names
-- set `grade_lunch_assignments` so each grade is assigned the correct lunch session automatically
-- update `time_blocks` if the schedule changes
+Leave `output_workbook_url` as `null` the first time you run the script. The script will create the output workbook for you and save that URL back into `config.json`.
 
-## Commands
+## Yearly Items To Review In `config.json`
 
-Validate the live source sheets and refresh the validation tabs:
+These values may need to change each year:
+
+- `student_responses_url`
+- `catalog_url`
+- `session_aliases`
+- `grade_lunch_assignments`
+- `time_blocks`
+- `pdf_output_dir`
+
+Important:
+
+- `session_aliases` is only for cases where the student form name does not exactly match the catalog name.
+- `grade_lunch_assignments` must match the real lunch plan for that year.
+- The values in `config.example.json` are examples, not guaranteed yearly defaults.
+
+## Normal Workflow
+
+Use this exact order each year.
+
+### Step 1. Validate the source sheets
 
 ```bash
 python scheduler.py validate
 ```
 
-Generate the draft schedule into the output workbook:
+What this does:
+
+- reads the student response sheet
+- reads the course catalog sheet
+- creates the output workbook if needed
+- writes validation results into the output workbook
+
+What to check:
+
+- open the output workbook
+- read `3 Validation Issues`
+- fix every row marked `ERROR` before continuing
+
+If validation stops with fatal issues, do not run the scheduler yet.
+
+### Step 2. Generate the draft schedule
 
 ```bash
 python scheduler.py run
 ```
 
-Generate the final PDFs from the `5 Final Schedule (Edit Here)` tab:
+What this does:
+
+- assigns lunch first by grade
+- assigns classes based on student rankings and session availability
+- writes a draft schedule to the output workbook
+- populates helper tabs teachers can use during manual cleanup
+
+What to check:
+
+- `4 Draft Schedule (Do Not Edit)`
+- `5 Final Schedule (Edit Here)`
+- `6 Waitlist`
+- `7 Students With Gaps`
+- `8 Session Rosters`
+- `9 Teacher View`
+
+Important:
+
+- `5 Final Schedule (Edit Here)` is the only tab teachers should edit.
+- If `5 Final Schedule (Edit Here)` was empty, the script will copy the draft into it automatically.
+- There is no manual copy/paste step on the first run.
+
+### Step 3. Teachers make manual edits
+
+Teachers should work only in:
+
+- `5 Final Schedule (Edit Here)`
+
+They may use these tabs while making decisions:
+
+- `6 Waitlist`
+- `7 Students With Gaps`
+- `8 Session Rosters`
+- `9 Teacher View`
+
+All other tabs are protected on purpose.
+
+### Step 4. Refresh reports after manual edits
+
+```bash
+python scheduler.py refresh-final
+```
+
+What this does:
+
+- rereads `5 Final Schedule (Edit Here)`
+- rebuilds the waitlist, gaps, roster, and teacher tabs from the edited final schedule
+- checks that final schedules still reference valid sessions and the required lunch period
+
+Run this after teachers finish editing and any time you want the helper tabs to match the current final schedule.
+
+### Step 5. Generate the PDFs
 
 ```bash
 python scheduler.py printables
 ```
 
-You can also call the printable step directly:
+What this does:
 
-```bash
-python printables.py
-```
+- refreshes the final report tabs again
+- generates the final PDFs from `5 Final Schedule (Edit Here)`
 
-## Workflow
+Files created:
 
-1. Run `python scheduler.py validate`.
-2. Fix every `ERROR` listed in `3 Validation Issues`.
-3. Run `python scheduler.py run`.
-4. Review `4 Draft Schedule (Do Not Edit)`.
-5. Open `5 Final Schedule (Edit Here)`.
-6. If that tab was empty, the script already copied the draft into it for you. No copy/paste step is required.
-7. Lunch is assigned automatically by grade from config and should already be present in the draft.
-8. Teachers edit only `5 Final Schedule (Edit Here)`.
-9. Run `python scheduler.py printables`.
+- `attendee_schedule.pdf`
+- `class_rosters.pdf`
+
+These files are written to the folder set by `pdf_output_dir` in `config.json`.
 
 ## Output Workbook Tabs
+
+The script creates and manages these tabs:
 
 - `1 Instructions`
 - `2 Run Status`
@@ -88,9 +198,53 @@ python printables.py
 - `9 Teacher View`
 - `10 Catalog Snapshot`
 
-## Notes
+Meaning of the main tabs:
 
-- `5 Final Schedule (Edit Here)` is not overwritten once it already contains data.
-- PDFs are generated from `5 Final Schedule (Edit Here)`, not from `4 Draft Schedule (Do Not Edit)`.
-- Lunch is assigned automatically from `grade_lunch_assignments` in config before other class preferences are scheduled.
-- The script stores Google OAuth tokens in `token.json` after the first successful login.
+- `4 Draft Schedule (Do Not Edit)` is the machine-generated draft.
+- `5 Final Schedule (Edit Here)` is the teacher-edited final version.
+- `6 Waitlist` shows students who wanted a session but could not be placed.
+- `7 Students With Gaps` shows students with one or more blank periods.
+- `8 Session Rosters` shows who is assigned to each session.
+- `9 Teacher View` gives a teacher-friendly schedule view.
+
+## Files In This Folder
+
+Files you edit:
+
+- `config.json`
+
+Files you provide and keep local:
+
+- `credentials.json`
+
+Files the script creates and keeps local:
+
+- `token.json`
+- `attendee_schedule.pdf`
+- `class_rosters.pdf`
+
+Do not commit `config.json`, `credentials.json`, or `token.json` to git.
+
+## Practical Notes
+
+- Run only one scheduler command at a time.
+- Use the same Google account each time unless you intentionally want a different owner/editor for the output workbook.
+- The script will not overwrite `5 Final Schedule (Edit Here)` if it already contains edited data.
+- PDFs are always generated from `5 Final Schedule (Edit Here)`, not from the draft tab.
+- Lunch is assigned automatically before other classes, based on `grade_lunch_assignments`.
+
+## If Something Looks Wrong
+
+If the schedule does not look right, check these first:
+
+1. `3 Validation Issues`
+2. `session_aliases` in `config.json`
+3. `grade_lunch_assignments` in `config.json`
+4. the session names and periods in the catalog sheet
+
+Common causes:
+
+- a session name in the student form does not exactly match the catalog
+- lunch assignments are wrong for the current year
+- the catalog does not mark the correct periods for a session
+- the output workbook is from an older test run

@@ -924,6 +924,10 @@ def build_waitlist_rows(
     return rows
 
 
+def build_pending_rows(message: str) -> list[list[str]]:
+    return [["Status"], [message]]
+
+
 def build_gap_rows(
     attendees: list[Attendee],
     assignments: dict[str, dict[str, str]],
@@ -935,6 +939,60 @@ def build_gap_rows(
         blanks = [display_period(period) for period in time_slots if not schedule[period]]
         if blanks:
             rows.append([attendee.name, attendee.grade, attendee.teacher, ", ".join(blanks)])
+    return rows
+
+
+def map_final_attendees_to_source(
+    final_attendees: list[Attendee],
+    source_attendees: list[Attendee],
+) -> dict[str, Attendee]:
+    buckets: dict[tuple[str, str, str], list[Attendee]] = defaultdict(list)
+    for attendee in source_attendees:
+        key = (
+            normalize_key(attendee.name),
+            normalize_key(attendee.grade),
+            normalize_key(attendee.teacher),
+        )
+        buckets[key].append(attendee)
+
+    mapping: dict[str, Attendee] = {}
+    for final_attendee in final_attendees:
+        key = (
+            normalize_key(final_attendee.name),
+            normalize_key(final_attendee.grade),
+            normalize_key(final_attendee.teacher),
+        )
+        if buckets[key]:
+            mapping[final_attendee.attendee_id] = buckets[key].pop(0)
+    return mapping
+
+
+def build_final_waitlist_rows(
+    final_attendees: list[Attendee],
+    final_assignments: dict[str, dict[str, str]],
+    source_attendees: list[Attendee],
+) -> list[list[str]]:
+    rows = [["Session", "Student", "Grade", "Teacher", "Preference Rank"]]
+    source_map = map_final_attendees_to_source(final_attendees, source_attendees)
+
+    for final_attendee in sorted(final_attendees, key=lambda item: (item.teacher, item.grade, item.name)):
+        source_attendee = source_map.get(final_attendee.attendee_id)
+        if source_attendee is None:
+            continue
+        assigned_sessions = {
+            session_name
+            for session_name in final_assignments[final_attendee.attendee_id].values()
+            if session_name
+        }
+        for rank, session_name in enumerate(source_attendee.choices, start=1):
+            if session_name not in assigned_sessions:
+                rows.append([
+                    session_name,
+                    final_attendee.name,
+                    final_attendee.grade,
+                    final_attendee.teacher,
+                    str(rank),
+                ])
     return rows
 
 
@@ -954,8 +1012,10 @@ def build_instruction_rows() -> list[list[str]]:
         ["Step 4", f"Open '{TAB_FINAL}'. This is the only schedule tab that teachers should edit."],
         ["Step 5", f"There is no copy/paste step on first run. If '{TAB_FINAL}' was empty, the script already copied the draft into it for you."],
         ["Step 6", "Lunch is assigned automatically by grade from config. Teachers do not need to add lunch by hand unless they are intentionally changing a student's final schedule."],
-        ["Step 7", f"After teacher edits are complete, run `python scheduler.py printables`. PDFs are built from '{TAB_FINAL}'."],
-        ["Reference", f"Use '{TAB_WAITLIST}', '{TAB_GAPS}', and '{TAB_ROSTERS}' as supporting reports while reviewing the schedule."],
+        ["Step 7", f"'{TAB_WAITLIST}', '{TAB_GAPS}', '{TAB_ROSTERS}', and '{TAB_TEACHER}' are created during the draft run so teachers can review them while editing."],
+        ["Step 8", f"After manual edits are complete, run `python scheduler.py refresh-final` to rebuild those tabs from '{TAB_FINAL}' without generating PDFs."],
+        ["Step 9", f"Run `python scheduler.py printables` when you are ready to generate PDFs. That command also refreshes the final reports from '{TAB_FINAL}'."],
+        ["Reference", f"Draft run reports are useful during review, but after edits you should refresh them so they match '{TAB_FINAL}'."],
         ["Important", f"Running the scheduler again updates '{TAB_DRAFT}' but leaves '{TAB_FINAL}' alone once it already has data."],
     ]
 
