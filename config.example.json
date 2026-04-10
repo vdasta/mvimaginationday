@@ -9,7 +9,10 @@
   "token_file": "token.json",
   "pdf_output_dir": ".",
   "session_aliases": {
-    "Basketball (3rd/4th)": "Basketball (3rd/4th grd)"
+    "Basketball (3rd/4th grd)": "Basketball (3rd/4th)",
+    "Strawberry DNA (2nd-4th)": "Strawberry DNA",
+    "Tie Dye (1st-4th)": "Tie Dye",
+    "Yoga Storytelling (K-2nd)": "Hip Hop"
   },
   "time_blocks": {
     "period1": "8:45-9:20",
