@@ -109,14 +109,34 @@ def load_config(config_path: Path) -> dict[str, Any]:
             "Create one from config.example.json."
         )
 
-    data = json.loads(config_path.read_text(encoding="utf-8"))
+    try:
+        raw_config = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"Could not read config file {config_path}: {exc}") from exc
+
+    try:
+        data = json.loads(raw_config)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"Config file {config_path} is not valid JSON: {exc.msg}") from exc
+
+    if not isinstance(data, dict):
+        raise ConfigError(f"Config file {config_path} must contain a JSON object.")
+
+    def mapping_value(key: str) -> dict[str, Any]:
+        value = data.get(key)
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ConfigError(f"Config key '{key}' must be a JSON object when set.")
+        return value
+
     config = dict(DEFAULT_CONFIG)
     config.update(data)
-    config["time_blocks"] = dict(DEFAULT_CONFIG["time_blocks"]) | dict(data.get("time_blocks", {}))
-    config["session_aliases"] = dict(data.get("session_aliases", {}))
+    config["time_blocks"] = dict(DEFAULT_CONFIG["time_blocks"]) | mapping_value("time_blocks")
+    config["session_aliases"] = dict(mapping_value("session_aliases"))
     config["grade_lunch_assignments"] = {
         normalize_text(grade): normalize_text(session_name)
-        for grade, session_name in dict(data.get("grade_lunch_assignments", {})).items()
+        for grade, session_name in mapping_value("grade_lunch_assignments").items()
         if normalize_text(grade) and normalize_text(session_name)
     }
 
@@ -600,16 +620,16 @@ def parse_catalog(rows: list[list[str]]) -> tuple[dict[str, SessionOffering], li
         )
         return {}, [], issues
 
-    rain_idx = idx.get("rainroom")
-    periods = [
-        header
-        for header in headers
-        if PERIOD_RE.fullmatch(normalize_text(header))
+    rain_idx = idx.get("rain room")
+    if rain_idx is None:
+        rain_idx = idx.get("rainroom")
+
+    period_columns = [
+        (normalize_text(header).replace(" ", "").lower(), col_idx)
+        for col_idx, header in enumerate(headers)
+        if PERIOD_RE.fullmatch(normalize_text(header).replace(" ", ""))
     ]
-    time_slots = sorted(
-        [normalize_text(period).replace(" ", "") for period in periods],
-        key=period_sort_key,
-    )
+    time_slots = [period for period, _ in sorted(period_columns, key=lambda item: period_sort_key(item[0]))]
 
     if not time_slots:
         issues.append(
@@ -622,7 +642,7 @@ def parse_catalog(rows: list[list[str]]) -> tuple[dict[str, SessionOffering], li
         )
         return {}, [], issues
 
-    period_idx = {slot: idx[normalize_key(slot)] for slot in time_slots}
+    period_idx = dict(period_columns)
     sessions: dict[str, SessionOffering] = {}
     duplicate_sessions: list[str] = []
 
@@ -897,7 +917,6 @@ def build_generated_schedule_rows(
     assignments: dict[str, dict[str, str]],
     time_slots: list[str],
 ) -> list[list[str]]:
-    attendee_map = {attendee.attendee_id: attendee for attendee in attendees}
     rows = [["Name", "Grade", "Teacher", *[display_period(period) for period in time_slots]]]
     for attendee in sorted(attendees, key=lambda item: (item.teacher, item.grade, item.name)):
         schedule = assignments[attendee.attendee_id]
@@ -1093,6 +1112,23 @@ def parse_schedule_rows(rows: list[list[str]]) -> tuple[list[Attendee], dict[str
     if not period_columns:
         raise ValueError("Final Schedule does not contain any Period columns.")
 
+    required_headers = {
+        "name": "Name",
+        "grade": "Grade",
+        "teacher": "Teacher",
+    }
+    missing_headers = [
+        display_name
+        for key, display_name in required_headers.items()
+        if key not in idx
+    ]
+    if missing_headers:
+        raise ValueError(
+            "Final Schedule is missing required columns: "
+            + ", ".join(missing_headers)
+            + "."
+        )
+
     time_slots = [period for period, _ in sorted(period_columns, key=lambda item: period_sort_key(item[0]))]
     attendees: list[Attendee] = []
     assignments: dict[str, dict[str, str]] = {}
@@ -1237,7 +1273,6 @@ def generate_pdf_outputs(
             return None
 
     roster_pdf = RosterPDF(orientation="L", unit="mm", format="Letter")
-    col_w = 37 if len(time_slots) == 7 else 44
     roster_rows = build_session_roster_rows(attendees, assignments, sessions, time_slots)
     by_session: dict[str, list[list[str]]] = defaultdict(list)
     for row in roster_rows[1:]:
@@ -1245,6 +1280,7 @@ def generate_pdf_outputs(
 
     for session_name in sorted(by_session):
         roster_pdf.add_page()
+        col_w = (roster_pdf.w - roster_pdf.l_margin - roster_pdf.r_margin) / max(len(time_slots), 1)
         roster_pdf.set_font("Helvetica", "B", 18)
         roster_pdf.cell(0, 10, session_name, align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         roster_pdf.set_font("Helvetica", "", 11)
