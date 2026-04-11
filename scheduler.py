@@ -416,6 +416,12 @@ def command_printables(config_path: Path, output_dir_override: str | None) -> in
     )
 
 
+def delta_or_none(left: int | float | None, right: int | float | None) -> int | float | None:
+    if left is None or right is None:
+        return None
+    return left - right
+
+
 def command_benchmark(
     config_path: Path,
     *,
@@ -484,17 +490,17 @@ def command_benchmark(
                     cp_sat["gap_metrics"]["students_with_gaps"]
                     - greedy["gap_metrics"]["students_with_gaps"]
                 ),
-                "normalized_rank_score": (
-                    cp_sat["preference_metrics"]["normalized_rank_score"]
-                    - greedy["preference_metrics"]["normalized_rank_score"]
+                "normalized_rank_score": delta_or_none(
+                    cp_sat["preference_metrics"]["normalized_rank_score"],
+                    greedy["preference_metrics"]["normalized_rank_score"],
                 ),
-                "non_lunch_seat_utilization": (
-                    cp_sat["capacity_metrics"]["non_lunch_seat_utilization"]
-                    - greedy["capacity_metrics"]["non_lunch_seat_utilization"]
+                "non_lunch_seat_utilization": delta_or_none(
+                    cp_sat["capacity_metrics"]["non_lunch_seat_utilization"],
+                    greedy["capacity_metrics"]["non_lunch_seat_utilization"],
                 ),
-                "solve_time_seconds": (
-                    cp_sat["solve_time_seconds"]
-                    - greedy["solve_time_seconds"]
+                "solve_time_seconds": delta_or_none(
+                    cp_sat["solve_time_seconds"],
+                    greedy["solve_time_seconds"],
                 ),
             },
         }

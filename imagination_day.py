@@ -776,7 +776,7 @@ def validate_data(
                     "ERROR",
                     "lunch_capacity",
                     lunch_session,
-                    "Lunch session has no available period in the catalog.",
+                    "Lunch session must mark exactly one active period in the catalog.",
                 )
             )
         elif len(lunch_periods) > 1:
@@ -786,32 +786,6 @@ def validate_data(
                     "lunch_capacity",
                     lunch_session,
                     f"Lunch session should have exactly one active period, but found {', '.join(display_period(period) for period in lunch_periods)}.",
-                )
-            )
-
-    lunch_headcount_by_session = Counter(
-        lunch_session
-        for grade, lunch_session in lunch_assignments.items()
-        if grade_counts.get(grade)
-    )
-    for lunch_session, assigned_grade_count in list(lunch_headcount_by_session.items()):
-        lunch_headcount_by_session[lunch_session] = sum(
-            grade_counts[grade]
-            for grade, session_name in lunch_assignments.items()
-            if session_name == lunch_session
-        )
-
-    for lunch_session, required_students in sorted(lunch_headcount_by_session.items()):
-        if lunch_session not in sessions:
-            continue
-        total_capacity = sum(sessions[lunch_session].capacities.values())
-        if total_capacity < required_students:
-            issues.append(
-                ValidationIssue(
-                    "ERROR",
-                    "lunch_capacity",
-                    lunch_session,
-                    f"Lunch session capacity is {total_capacity}, but {required_students} students are assigned to it by grade config.",
                 )
             )
 
@@ -873,7 +847,6 @@ def seed_lunch_assignments(
     dict[str, dict[str, str]],
     dict[str, dict[str, int]],
     dict[str, set[str]],
-    dict[str, list[tuple[str, int]]],
     dict[str, str],
     set[str],
 ]:
@@ -893,25 +866,20 @@ def seed_lunch_assignments(
         attendee.attendee_id: set()
         for attendee in attendees
     }
-    wait_lists: dict[str, list[tuple[str, int]]] = defaultdict(list)
 
     for attendee in attendees:
         lunch_session = lunch_assignments.get(normalize_text(attendee.grade), "")
         if not lunch_session:
             continue
         lunch_period = lunch_periods.get(normalize_text(attendee.grade), "")
-        if lunch_period and capacities[lunch_session][lunch_period] > 0:
+        if lunch_period:
             assignments[attendee.attendee_id][lunch_period] = lunch_session
-            capacities[lunch_session][lunch_period] -= 1
             taken_periods_by_attendee[attendee.attendee_id].add(lunch_period)
-        else:
-            wait_lists[lunch_session].append((attendee.attendee_id, 0))
 
     return (
         assignments,
         capacities,
         taken_periods_by_attendee,
-        wait_lists,
         lunch_assignments,
         lunch_sessions,
     )
@@ -932,9 +900,6 @@ def build_wait_lists_from_assignments(
             for session_name in assignments[attendee.attendee_id].values()
             if session_name
         }
-        expected_lunch = lunch_assignments.get(normalize_text(attendee.grade), "")
-        if expected_lunch and expected_lunch not in assigned_sessions:
-            wait_lists[expected_lunch].append((attendee.attendee_id, 0))
         for rank, session_name in enumerate(ranked_non_lunch_choices(attendee, lunch_sessions), start=1):
             if session_name not in assigned_sessions:
                 wait_lists[session_name].append((attendee.attendee_id, rank))
@@ -953,10 +918,10 @@ def assign_attendees_greedy(
         assignments,
         capacities,
         taken_periods_by_attendee,
-        wait_lists,
         _lunch_assignments,
         lunch_sessions,
     ) = seed_lunch_assignments(attendees, sessions, time_slots, config)
+    wait_lists: dict[str, list[tuple[str, int]]] = defaultdict(list)
 
     sorted_attendees = sorted(
         attendees,
@@ -1007,7 +972,6 @@ def assign_attendees_cp_sat(
         assignments,
         capacities,
         taken_periods_by_attendee,
-        lunch_wait_lists,
         lunch_assignments,
         lunch_sessions,
     ) = seed_lunch_assignments(attendees, sessions, time_slots, config)
@@ -1085,7 +1049,6 @@ def assign_attendees_cp_sat(
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit_seconds
-    solver.parameters.num_search_workers = 8
     status = solver.solve(model)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         raise RuntimeError("CP-SAT could not produce a feasible schedule.")
@@ -1095,8 +1058,6 @@ def assign_attendees_cp_sat(
             assignments[attendee_id][period] = session_name
 
     wait_lists = build_wait_lists_from_assignments(attendees, assignments, config)
-    for session_name, entries in lunch_wait_lists.items():
-        wait_lists[session_name].extend(entries)
     return assignments, wait_lists
 
 
