@@ -841,19 +841,122 @@ def scarcity_score(attendee: Attendee, totals: dict[str, int]) -> int:
     return min(capacities) if capacities else 0
 
 
-def assign_attendees(
+def ranked_non_lunch_choices(attendee: Attendee, lunch_sessions: set[str]) -> list[str]:
+    return [session_name for session_name in attendee.choices if session_name not in lunch_sessions]
+
+
+def build_lunch_period_lookup(
+    sessions: dict[str, SessionOffering],
+    lunch_assignments: dict[str, str],
+) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for grade, lunch_session in lunch_assignments.items():
+        session = sessions.get(lunch_session)
+        if session is None:
+            continue
+        open_periods = [
+            period
+            for period, remaining in session.capacities.items()
+            if remaining > 0
+        ]
+        if open_periods:
+            lookup[grade] = min(open_periods, key=period_sort_key)
+    return lookup
+
+
+def seed_lunch_assignments(
+    attendees: list[Attendee],
+    sessions: dict[str, SessionOffering],
+    time_slots: list[str],
+    config: dict[str, Any],
+) -> tuple[
+    dict[str, dict[str, str]],
+    dict[str, dict[str, int]],
+    dict[str, set[str]],
+    dict[str, list[tuple[str, int]]],
+    dict[str, str],
+    set[str],
+]:
+    capacities = {
+        name: dict(session.capacities)
+        for name, session in sessions.items()
+    }
+    lunch_assignments = canonical_grade_lunch_assignments(config)
+    lunch_sessions = lunch_sessions_in_use(lunch_assignments)
+    lunch_periods = build_lunch_period_lookup(sessions, lunch_assignments)
+
+    assignments = {
+        attendee.attendee_id: {period: "" for period in time_slots}
+        for attendee in attendees
+    }
+    taken_periods_by_attendee = {
+        attendee.attendee_id: set()
+        for attendee in attendees
+    }
+    wait_lists: dict[str, list[tuple[str, int]]] = defaultdict(list)
+
+    for attendee in attendees:
+        lunch_session = lunch_assignments.get(normalize_text(attendee.grade), "")
+        if not lunch_session:
+            continue
+        lunch_period = lunch_periods.get(normalize_text(attendee.grade), "")
+        if lunch_period and capacities[lunch_session][lunch_period] > 0:
+            assignments[attendee.attendee_id][lunch_period] = lunch_session
+            capacities[lunch_session][lunch_period] -= 1
+            taken_periods_by_attendee[attendee.attendee_id].add(lunch_period)
+        else:
+            wait_lists[lunch_session].append((attendee.attendee_id, 0))
+
+    return (
+        assignments,
+        capacities,
+        taken_periods_by_attendee,
+        wait_lists,
+        lunch_assignments,
+        lunch_sessions,
+    )
+
+
+def build_wait_lists_from_assignments(
+    attendees: list[Attendee],
+    assignments: dict[str, dict[str, str]],
+    config: dict[str, Any],
+) -> dict[str, list[tuple[str, int]]]:
+    lunch_assignments = canonical_grade_lunch_assignments(config)
+    lunch_sessions = lunch_sessions_in_use(lunch_assignments)
+    wait_lists: dict[str, list[tuple[str, int]]] = defaultdict(list)
+
+    for attendee in attendees:
+        assigned_sessions = {
+            session_name
+            for session_name in assignments[attendee.attendee_id].values()
+            if session_name
+        }
+        expected_lunch = lunch_assignments.get(normalize_text(attendee.grade), "")
+        if expected_lunch and expected_lunch not in assigned_sessions:
+            wait_lists[expected_lunch].append((attendee.attendee_id, 0))
+        for rank, session_name in enumerate(ranked_non_lunch_choices(attendee, lunch_sessions), start=1):
+            if session_name not in assigned_sessions:
+                wait_lists[session_name].append((attendee.attendee_id, rank))
+
+    return wait_lists
+
+
+def assign_attendees_greedy(
     attendees: list[Attendee],
     sessions: dict[str, SessionOffering],
     time_slots: list[str],
     config: dict[str, Any],
 ) -> tuple[dict[str, dict[str, str]], dict[str, list[tuple[str, int]]]]:
-    capacities = {
-        name: dict(session.capacities)
-        for name, session in sessions.items()
-    }
     totals = session_capacity_totals(sessions)
-    lunch_assignments = canonical_grade_lunch_assignments(config)
-    lunch_sessions = lunch_sessions_in_use(lunch_assignments)
+    (
+        assignments,
+        capacities,
+        taken_periods_by_attendee,
+        wait_lists,
+        _lunch_assignments,
+        lunch_sessions,
+    ) = seed_lunch_assignments(attendees, sessions, time_slots, config)
 
     sorted_attendees = sorted(
         attendees,
@@ -865,39 +968,14 @@ def assign_attendees(
         ),
     )
 
-    assignments = {
-        attendee.attendee_id: {period: "" for period in time_slots}
-        for attendee in attendees
-    }
-    wait_lists: dict[str, list[tuple[str, int]]] = defaultdict(list)
-
     for attendee in sorted_attendees:
-        taken_periods: set[str] = set()
-        lunch_session = lunch_assignments.get(normalize_text(attendee.grade), "")
-        if lunch_session:
-            lunch_open_periods = {
-                period: remaining
-                for period, remaining in capacities[lunch_session].items()
-                if remaining > 0 and period not in taken_periods
-            }
-            if lunch_open_periods:
-                lunch_period = max(lunch_open_periods, key=lunch_open_periods.get)
-                assignments[attendee.attendee_id][lunch_period] = lunch_session
-                capacities[lunch_session][lunch_period] -= 1
-                taken_periods.add(lunch_period)
-            else:
-                wait_lists[lunch_session].append((attendee.attendee_id, 0))
-
-        ranked_choices = [
-            session_name
-            for session_name in attendee.choices
-            if session_name not in lunch_sessions
-        ]
+        taken_periods = set(taken_periods_by_attendee[attendee.attendee_id])
+        ranked_choices = ranked_non_lunch_choices(attendee, lunch_sessions)
 
         for rank, session_name in enumerate(ranked_choices, start=1):
             open_periods = {
                 period: remaining
-                for period, remaining in capacities[session_name].items()
+                for period, remaining in capacities.get(session_name, {}).items()
                 if remaining > 0 and period not in taken_periods
             }
             if not open_periods:
@@ -910,6 +988,340 @@ def assign_attendees(
             taken_periods.add(best_period)
 
     return assignments, wait_lists
+
+
+def assign_attendees_cp_sat(
+    attendees: list[Attendee],
+    sessions: dict[str, SessionOffering],
+    time_slots: list[str],
+    config: dict[str, Any],
+    *,
+    time_limit_seconds: float = 10.0,
+) -> tuple[dict[str, dict[str, str]], dict[str, list[tuple[str, int]]]]:
+    try:
+        from ortools.sat.python import cp_model
+    except ImportError as exc:  # pragma: no cover - import guard
+        raise ConfigError("CP-SAT scheduling requires the 'ortools' package.") from exc
+
+    (
+        assignments,
+        capacities,
+        taken_periods_by_attendee,
+        lunch_wait_lists,
+        lunch_assignments,
+        lunch_sessions,
+    ) = seed_lunch_assignments(attendees, sessions, time_slots, config)
+
+    model = cp_model.CpModel()
+    all_decision_vars = []
+    vars_by_attendee: dict[str, list[Any]] = defaultdict(list)
+    vars_by_attendee_period: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    vars_by_attendee_session: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    vars_by_session_period: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    rank_bonus_terms = []
+    top_choice_hit_vars = []
+    no_gap_vars = []
+
+    for attendee_idx, attendee in enumerate(attendees):
+        attendee_id = attendee.attendee_id
+        ranked_choices = ranked_non_lunch_choices(attendee, lunch_sessions)
+        target_non_lunch_slots = len(time_slots)
+        if lunch_assignments.get(normalize_text(attendee.grade), ""):
+            target_non_lunch_slots -= 1
+
+        for rank, session_name in enumerate(ranked_choices, start=1):
+            if session_name not in capacities:
+                continue
+            rank_bonus = max(len(ranked_choices) + 1 - rank, 0)
+            for period, remaining in capacities[session_name].items():
+                if remaining <= 0 or period in taken_periods_by_attendee[attendee_id]:
+                    continue
+                var = model.new_bool_var(f"x_{attendee_idx}_{rank}_{period}")
+                all_decision_vars.append((attendee_id, session_name, period, var))
+                vars_by_attendee[attendee_id].append(var)
+                vars_by_attendee_period[(attendee_id, period)].append(var)
+                vars_by_attendee_session[(attendee_id, session_name)].append(var)
+                vars_by_session_period[(session_name, period)].append(var)
+                rank_bonus_terms.append(rank_bonus * var)
+
+        for period in time_slots:
+            period_vars = vars_by_attendee_period.get((attendee_id, period), [])
+            if period_vars:
+                model.add(sum(period_vars) <= 1)
+
+        for session_name in ranked_choices:
+            session_vars = vars_by_attendee_session.get((attendee_id, session_name), [])
+            if session_vars:
+                model.add(sum(session_vars) <= 1)
+
+        assigned_count = sum(vars_by_attendee.get(attendee_id, []))
+        no_gap = model.new_bool_var(f"no_gap_{attendee_idx}")
+        if target_non_lunch_slots <= 0:
+            model.add(no_gap == 1)
+        else:
+            model.add(assigned_count >= target_non_lunch_slots * no_gap)
+        no_gap_vars.append(no_gap)
+
+        top_choice_vars = []
+        if ranked_choices:
+            top_choice_vars = vars_by_attendee_session.get((attendee_id, ranked_choices[0]), [])
+        if top_choice_vars:
+            top_choice_hit = model.new_bool_var(f"top_choice_{attendee_idx}")
+            model.add(sum(top_choice_vars) >= top_choice_hit)
+            model.add(sum(top_choice_vars) <= top_choice_hit)
+            top_choice_hit_vars.append(top_choice_hit)
+
+    for (session_name, period), period_vars in vars_by_session_period.items():
+        model.add(sum(period_vars) <= capacities[session_name][period])
+
+    assignment_weight = 1_000_000_000
+    no_gap_weight = 10_000_000
+    top_choice_weight = 100_000
+    objective = assignment_weight * sum(var for _, _, _, var in all_decision_vars)
+    objective += no_gap_weight * sum(no_gap_vars)
+    objective += top_choice_weight * sum(top_choice_hit_vars)
+    objective += sum(rank_bonus_terms)
+    model.maximize(objective)
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = time_limit_seconds
+    solver.parameters.num_search_workers = 8
+    status = solver.solve(model)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        raise RuntimeError("CP-SAT could not produce a feasible schedule.")
+
+    for attendee_id, session_name, period, var in all_decision_vars:
+        if solver.value(var):
+            assignments[attendee_id][period] = session_name
+
+    wait_lists = build_wait_lists_from_assignments(attendees, assignments, config)
+    for session_name, entries in lunch_wait_lists.items():
+        wait_lists[session_name].extend(entries)
+    return assignments, wait_lists
+
+
+def assign_attendees(
+    attendees: list[Attendee],
+    sessions: dict[str, SessionOffering],
+    time_slots: list[str],
+    config: dict[str, Any],
+    *,
+    algorithm: str = "greedy",
+    time_limit_seconds: float = 10.0,
+) -> tuple[dict[str, dict[str, str]], dict[str, list[tuple[str, int]]]]:
+    normalized_algorithm = normalize_text(algorithm).casefold()
+    if normalized_algorithm == "greedy":
+        return assign_attendees_greedy(attendees, sessions, time_slots, config)
+    if normalized_algorithm in {"cp-sat", "cpsat"}:
+        return assign_attendees_cp_sat(
+            attendees,
+            sessions,
+            time_slots,
+            config,
+            time_limit_seconds=time_limit_seconds,
+        )
+    raise ConfigError(f"Unknown scheduling algorithm '{algorithm}'.")
+
+
+def median_value(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def compute_schedule_metrics(
+    attendees: list[Attendee],
+    sessions: dict[str, SessionOffering],
+    time_slots: list[str],
+    assignments: dict[str, dict[str, str]],
+    config: dict[str, Any],
+    *,
+    algorithm: str,
+    solve_time_seconds: float | None = None,
+) -> dict[str, Any]:
+    lunch_assignments = canonical_grade_lunch_assignments(config)
+    lunch_sessions = lunch_sessions_in_use(lunch_assignments)
+
+    total_requested_non_lunch = 0
+    total_schedulable_requested = 0
+    total_non_lunch_slots = 0
+    total_assigned_non_lunch = 0
+    manual_gap_slots = 0
+    students_with_gaps = 0
+    students_with_top1 = 0
+    total_top3_hits = 0
+    total_top3_opportunities = 0
+    total_top5_hits = 0
+    total_top5_opportunities = 0
+    total_rank_sum = 0
+    total_rank_hits = 0
+    achieved_rank_score = 0
+    ideal_rank_score = 0
+    unmet_request_counts: Counter[str] = Counter()
+
+    for attendee in attendees:
+        attendee_id = attendee.attendee_id
+        lunch_session = lunch_assignments.get(normalize_text(attendee.grade), "")
+        target_non_lunch_slots = len(time_slots) - (1 if lunch_session else 0)
+        ranked_choices = ranked_non_lunch_choices(attendee, lunch_sessions)
+        assigned_sessions = {
+            session_name
+            for session_name in assignments[attendee_id].values()
+            if session_name
+        }
+        assigned_non_lunch = [
+            session_name
+            for session_name in assignments[attendee_id].values()
+            if session_name and session_name not in lunch_sessions
+        ]
+        assigned_choice_ranks = []
+        for rank, session_name in enumerate(ranked_choices, start=1):
+            if session_name in assigned_sessions:
+                assigned_choice_ranks.append(rank)
+            else:
+                unmet_request_counts[session_name] += 1
+
+        schedulable_requested = min(len(ranked_choices), target_non_lunch_slots)
+        total_requested_non_lunch += len(ranked_choices)
+        total_schedulable_requested += schedulable_requested
+        total_non_lunch_slots += target_non_lunch_slots
+        total_assigned_non_lunch += len(assigned_non_lunch)
+        manual_gap_slots += max(target_non_lunch_slots - len(assigned_non_lunch), 0)
+        if len(assigned_non_lunch) < target_non_lunch_slots:
+            students_with_gaps += 1
+        if ranked_choices and ranked_choices[0] in assigned_sessions:
+            students_with_top1 += 1
+
+        top3_opportunities = min(3, schedulable_requested)
+        top5_opportunities = min(5, schedulable_requested)
+        total_top3_opportunities += top3_opportunities
+        total_top5_opportunities += top5_opportunities
+        total_top3_hits += sum(1 for session_name in ranked_choices[:3] if session_name in assigned_sessions)
+        total_top5_hits += sum(1 for session_name in ranked_choices[:5] if session_name in assigned_sessions)
+
+        total_rank_sum += sum(assigned_choice_ranks)
+        total_rank_hits += len(assigned_choice_ranks)
+        achieved_rank_score += sum(max(schedulable_requested + 1 - rank, 0) for rank in assigned_choice_ranks)
+        ideal_rank_score += sum(
+            schedulable_requested + 1 - rank
+            for rank in range(1, schedulable_requested + 1)
+        )
+
+    non_lunch_capacity_total = 0
+    non_lunch_session_fill_rates = []
+    non_lunch_period_fill_rates = []
+    non_lunch_period_loads: Counter[str] = Counter()
+
+    for session_name, session in sessions.items():
+        if session_name in lunch_sessions:
+            continue
+        session_capacity_total = 0
+        session_used_total = 0
+        for period in time_slots:
+            capacity = session.capacities.get(period, 0)
+            used = sum(
+                1
+                for schedule in assignments.values()
+                if schedule.get(period) == session_name
+            )
+            session_capacity_total += capacity
+            session_used_total += used
+            if capacity > 0:
+                non_lunch_capacity_total += capacity
+                non_lunch_period_fill_rates.append(used / capacity)
+                non_lunch_period_loads[period] += used
+        if session_capacity_total > 0:
+            non_lunch_session_fill_rates.append(session_used_total / session_capacity_total)
+
+    return {
+        "algorithm": algorithm,
+        "solve_time_seconds": solve_time_seconds,
+        "student_count": len(attendees),
+        "session_count": len(sessions),
+        "time_slot_count": len(time_slots),
+        "preference_metrics": {
+            "requested_non_lunch_total": total_requested_non_lunch,
+            "schedulable_requested_total": total_schedulable_requested,
+            "assigned_non_lunch_total": total_assigned_non_lunch,
+            "schedulable_request_fill_rate": (
+                total_assigned_non_lunch / total_schedulable_requested
+                if total_schedulable_requested
+                else None
+            ),
+            "students_with_top1": students_with_top1,
+            "students_with_top1_rate": (
+                students_with_top1 / len(attendees)
+                if attendees
+                else None
+            ),
+            "top3_request_coverage_rate": (
+                total_top3_hits / total_top3_opportunities
+                if total_top3_opportunities
+                else None
+            ),
+            "top5_request_coverage_rate": (
+                total_top5_hits / total_top5_opportunities
+                if total_top5_opportunities
+                else None
+            ),
+            "average_assigned_rank": (
+                total_rank_sum / total_rank_hits
+                if total_rank_hits
+                else None
+            ),
+            "normalized_rank_score": (
+                achieved_rank_score / ideal_rank_score
+                if ideal_rank_score
+                else None
+            ),
+        },
+        "gap_metrics": {
+            "students_with_gaps": students_with_gaps,
+            "students_with_gaps_rate": (
+                students_with_gaps / len(attendees)
+                if attendees
+                else None
+            ),
+            "manual_gap_slots": manual_gap_slots,
+            "full_non_lunch_slots": total_non_lunch_slots,
+            "filled_non_lunch_slot_rate": (
+                total_assigned_non_lunch / total_non_lunch_slots
+                if total_non_lunch_slots
+                else None
+            ),
+        },
+        "capacity_metrics": {
+            "non_lunch_capacity_total": non_lunch_capacity_total,
+            "non_lunch_seat_utilization": (
+                total_assigned_non_lunch / non_lunch_capacity_total
+                if non_lunch_capacity_total
+                else None
+            ),
+            "avg_open_non_lunch_period_fill_rate": (
+                sum(non_lunch_period_fill_rates) / len(non_lunch_period_fill_rates)
+                if non_lunch_period_fill_rates
+                else None
+            ),
+            "median_open_non_lunch_period_fill_rate": median_value(non_lunch_period_fill_rates),
+            "avg_non_lunch_session_fill_rate": (
+                sum(non_lunch_session_fill_rates) / len(non_lunch_session_fill_rates)
+                if non_lunch_session_fill_rates
+                else None
+            ),
+            "period_non_lunch_loads": dict(non_lunch_period_loads),
+        },
+        "unmet_demand": {
+            "unassigned_requested_choices_total": sum(unmet_request_counts.values()),
+            "top_unmet_sessions": sorted(
+                unmet_request_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:10],
+        },
+    }
 
 
 def build_generated_schedule_rows(

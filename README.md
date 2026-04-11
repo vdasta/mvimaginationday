@@ -114,12 +114,30 @@ If validation stops with fatal issues, do not run the scheduler yet.
 python scheduler.py run
 ```
 
+Or compare the current greedy scheduler against the CP-SAT solver before writing any tabs:
+
+```bash
+python scheduler.py benchmark
+```
+
+To generate the draft with the CP-SAT solver instead of the default greedy heuristic:
+
+```bash
+python scheduler.py run --algorithm cp-sat
+```
+
 What this does:
 
 - assigns lunch first by grade
 - assigns classes based on student rankings and session availability
 - writes a draft schedule to the output workbook
 - populates helper tabs teachers can use during manual cleanup
+
+What `benchmark` does:
+
+- reads the same student and catalog sheets used by `run`
+- computes schedule quality metrics for one or more algorithms
+- prints a JSON comparison so you can compare preference satisfaction, gaps, and seat utilization before switching algorithms
 
 What to check:
 
