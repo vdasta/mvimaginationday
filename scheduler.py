@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
+from time import perf_counter
 
 from imagination_day import (
     canonical_grade_lunch_assignments,
     ConfigError,
+    compute_schedule_metrics,
     GoogleSheetsClient,
     OUTPUT_TABS,
     TAB_CATALOG,
@@ -53,7 +56,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate", help="Validate the source sheets and refresh validation tabs")
-    subparsers.add_parser("run", help="Generate a draft schedule into the output workbook")
+    run_parser = subparsers.add_parser("run", help="Generate a draft schedule into the output workbook")
+    run_parser.add_argument(
+        "--algorithm",
+        default="greedy",
+        choices=("greedy", "cp-sat"),
+        help="Scheduling algorithm to use for draft generation (default: greedy)",
+    )
+    run_parser.add_argument(
+        "--cp-sat-time-limit",
+        type=float,
+        default=10.0,
+        help="Maximum CP-SAT solve time in seconds when --algorithm=cp-sat (default: 10)",
+    )
     subparsers.add_parser(
         "refresh-final",
         help="Revalidate the edited Final Schedule and refresh final waitlist/gaps/rosters without generating PDFs",
@@ -77,6 +92,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Overwrite the target config file if it already exists",
+    )
+
+    benchmark = subparsers.add_parser(
+        "benchmark",
+        help="Compare scheduling algorithms on the source sheets without writing workbook tabs",
+    )
+    benchmark.add_argument(
+        "--algorithms",
+        nargs="+",
+        default=["greedy", "cp-sat"],
+        choices=("greedy", "cp-sat"),
+        help="Algorithms to compare (default: greedy cp-sat)",
+    )
+    benchmark.add_argument(
+        "--cp-sat-time-limit",
+        type=float,
+        default=10.0,
+        help="Maximum CP-SAT solve time in seconds when included in --algorithms (default: 10)",
     )
     return parser
 
@@ -166,7 +199,7 @@ def command_validate(config_path: Path) -> int:
     return 1 if fatal_count else 0
 
 
-def command_run(config_path: Path) -> int:
+def command_run(config_path: Path, *, algorithm: str, cp_sat_time_limit: float) -> int:
     config = load_config(config_path)
     client = GoogleSheetsClient(config["credentials_file"], config["token_file"])
     output_workbook_url = ensure_output_workbook(client, config, config_path)
@@ -193,7 +226,14 @@ def command_run(config_path: Path) -> int:
         print(f"See {TAB_VALIDATION} in {output_workbook_url}")
         return 1
 
-    assignments, wait_lists = assign_attendees(attendees, sessions, time_slots, config)
+    assignments, wait_lists = assign_attendees(
+        attendees,
+        sessions,
+        time_slots,
+        config,
+        algorithm=algorithm,
+        time_limit_seconds=cp_sat_time_limit,
+    )
     generated_rows = build_generated_schedule_rows(attendees, assignments, time_slots)
     waitlist_rows = build_waitlist_rows(wait_lists, attendees)
     gap_rows = build_gap_rows(attendees, assignments, time_slots)
@@ -235,6 +275,7 @@ def command_run(config_path: Path) -> int:
     client.sync_output_tab_protections(output_workbook_url)
 
     print(f"Draft schedule written to {output_workbook_url}")
+    print(f"Algorithm: {algorithm}")
     if final_schedule_seeded:
         print(f"{TAB_FINAL} was empty, so it was seeded automatically from {TAB_DRAFT}.")
     elif final_schedule_refreshed:
@@ -375,6 +416,112 @@ def command_printables(config_path: Path, output_dir_override: str | None) -> in
     )
 
 
+def delta_or_none(left: int | float | None, right: int | float | None) -> int | float | None:
+    if left is None or right is None:
+        return None
+    return left - right
+
+
+def command_benchmark(
+    config_path: Path,
+    *,
+    algorithms: list[str],
+    cp_sat_time_limit: float,
+) -> int:
+    config = load_config(config_path)
+    client = GoogleSheetsClient(config["credentials_file"], config["token_file"])
+    attendees, sessions, time_slots, issues, student_meta, catalog_meta = load_source_data(client, config)
+    fatal_count = fatal_issue_count(issues)
+    if fatal_count:
+        print(json.dumps({
+            "validation": {
+                "total_issues": len(issues),
+                "fatal_issues": fatal_count,
+            },
+            "error": "Benchmark stopped because validation found fatal issues.",
+        }, indent=2))
+        return 1
+
+    results = {}
+    for algorithm in algorithms:
+        started = perf_counter()
+        assignments, wait_lists = assign_attendees(
+            attendees,
+            sessions,
+            time_slots,
+            config,
+            algorithm=algorithm,
+            time_limit_seconds=cp_sat_time_limit,
+        )
+        solve_time_seconds = perf_counter() - started
+        metrics = compute_schedule_metrics(
+            attendees,
+            sessions,
+            time_slots,
+            assignments,
+            config,
+            algorithm=algorithm,
+            solve_time_seconds=solve_time_seconds,
+        )
+        metrics["reported_waitlist_entries"] = sum(len(entries) for entries in wait_lists.values())
+        results[algorithm] = metrics
+
+    comparison = {}
+    if "greedy" in results and "cp-sat" in results:
+        greedy = results["greedy"]
+        cp_sat = results["cp-sat"]
+        comparison = {
+            "candidate": "cp-sat",
+            "baseline": "greedy",
+            "deltas": {
+                "assigned_non_lunch_total": (
+                    cp_sat["preference_metrics"]["assigned_non_lunch_total"]
+                    - greedy["preference_metrics"]["assigned_non_lunch_total"]
+                ),
+                "students_with_top1": (
+                    cp_sat["preference_metrics"]["students_with_top1"]
+                    - greedy["preference_metrics"]["students_with_top1"]
+                ),
+                "manual_gap_slots": (
+                    cp_sat["gap_metrics"]["manual_gap_slots"]
+                    - greedy["gap_metrics"]["manual_gap_slots"]
+                ),
+                "students_with_gaps": (
+                    cp_sat["gap_metrics"]["students_with_gaps"]
+                    - greedy["gap_metrics"]["students_with_gaps"]
+                ),
+                "normalized_rank_score": delta_or_none(
+                    cp_sat["preference_metrics"]["normalized_rank_score"],
+                    greedy["preference_metrics"]["normalized_rank_score"],
+                ),
+                "non_lunch_seat_utilization": delta_or_none(
+                    cp_sat["capacity_metrics"]["non_lunch_seat_utilization"],
+                    greedy["capacity_metrics"]["non_lunch_seat_utilization"],
+                ),
+                "solve_time_seconds": delta_or_none(
+                    cp_sat["solve_time_seconds"],
+                    greedy["solve_time_seconds"],
+                ),
+            },
+        }
+
+    print(json.dumps({
+        "student_source": student_meta["properties"]["title"],
+        "catalog_source": catalog_meta["properties"]["title"],
+        "student_count": len(attendees),
+        "session_count": len(sessions),
+        "time_slot_count": len(time_slots),
+        "validation": {
+            "total_issues": len(issues),
+            "fatal_issues": fatal_count,
+            "warnings": len(issues) - fatal_count,
+        },
+        "algorithms": results,
+        "comparison": comparison,
+    }, indent=2))
+    return 0
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -387,11 +534,21 @@ def main() -> int:
         if args.command == "validate":
             return command_validate(config_path)
         if args.command == "run":
-            return command_run(config_path)
+            return command_run(
+                config_path,
+                algorithm=args.algorithm,
+                cp_sat_time_limit=args.cp_sat_time_limit,
+            )
         if args.command == "refresh-final":
             return command_refresh_final(config_path)
         if args.command == "printables":
             return command_printables(config_path, args.output_dir)
+        if args.command == "benchmark":
+            return command_benchmark(
+                config_path,
+                algorithms=args.algorithms,
+                cp_sat_time_limit=args.cp_sat_time_limit,
+            )
         parser.error(f"Unknown command: {args.command}")
     except ConfigError as exc:
         print(f"Configuration error: {exc}")
