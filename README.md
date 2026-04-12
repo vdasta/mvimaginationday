@@ -66,6 +66,32 @@ Fill in these required values:
 
 Leave `output_workbook_url` as `null` the first time you run the script. The script will create the output workbook for you and save that URL back into `config.json`.
 
+## Streamlit Wizard
+
+If you want a step-by-step local UI instead of raw commands, run:
+
+```bash
+streamlit run streamlit_app.py
+```
+
+What the wizard does:
+
+- lets you edit and save `config.json`
+- shows whether `credentials.json` and `token.json` are present
+- runs the same workflow buttons in order:
+  - validate
+  - generate draft schedule
+  - refresh final reports
+  - generate PDFs
+- shows the latest logs from each step
+- links to the output workbook once it exists
+
+Notes:
+
+- the wizard still uses the same local files and Google Sheets access as the CLI
+- on the first successful run, Google OAuth will open in your browser and create `token.json`
+- teachers still make manual edits in `5 Final Schedule (Edit Here)` inside the output workbook
+
 ## Yearly Items To Review In `config.json`
 
 These values may need to change each year:
