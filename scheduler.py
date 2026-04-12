@@ -59,9 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Generate a draft schedule into the output workbook")
     run_parser.add_argument(
         "--algorithm",
-        default="greedy",
+        default="cp-sat",
         choices=("greedy", "cp-sat"),
-        help="Scheduling algorithm to use for draft generation (default: greedy)",
+        help="Scheduling algorithm to use for draft generation (default: cp-sat)",
     )
     run_parser.add_argument(
         "--cp-sat-time-limit",
