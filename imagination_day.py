@@ -1403,7 +1403,7 @@ def build_instruction_rows() -> list[list[str]]:
         ["Step 3", f"Review '{TAB_DRAFT}'. This tab is overwritten on each run and should not be edited by hand."],
         ["Step 4", f"Open '{TAB_FINAL}'. This is the only schedule tab that teachers should edit."],
         ["Step 5", f"There is no copy/paste step on first run. If '{TAB_FINAL}' was empty, the script already copied the draft into it for you."],
-        ["Step 6", "Lunch is assigned automatically by grade from config. Teachers do not need to add lunch by hand unless they are intentionally changing a student's final schedule."],
+        ["Step 6", "Lunch is assigned automatically by grade from config in the draft schedule. Teachers may edit lunches in the final schedule when they need an exception."],
         ["Step 7", f"'{TAB_WAITLIST}', '{TAB_GAPS}', '{TAB_ROSTERS}', and '{TAB_TEACHER}' are created during the draft run so teachers can review them while editing."],
         ["Step 8", f"After manual edits are complete, run `python scheduler.py refresh-final` to rebuild those tabs from '{TAB_FINAL}' without generating PDFs."],
         ["Step 9", f"Run `python scheduler.py printables` when you are ready to generate PDFs. That command also refreshes the final reports from '{TAB_FINAL}'."],

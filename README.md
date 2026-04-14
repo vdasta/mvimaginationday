@@ -205,7 +205,7 @@ What this does:
 
 - rereads `5 Final Schedule (Edit Here)`
 - rebuilds the waitlist, gaps, roster, and teacher tabs from the edited final schedule
-- checks that final schedules still reference valid sessions and the required lunch period
+- checks that final schedules still reference valid catalog sessions
 
 Run this after teachers finish editing and any time you want the helper tabs to match the current final schedule.
 

@@ -294,7 +294,6 @@ def validate_final_schedule(
     issues: list[ValidationIssue] = []
     known_sessions = set(sessions)
     attendee_map = {attendee.attendee_id: attendee for attendee in attendees}
-    lunch_assignments = canonical_grade_lunch_assignments(config)
 
     for attendee_id, schedule in assignments.items():
         attendee = attendee_map[attendee_id]
@@ -306,22 +305,6 @@ def validate_final_schedule(
                         "final_schedule_session",
                         attendee.name,
                         f"{period} references '{session_name}', which is not in the catalog.",
-                    )
-                )
-
-        expected_lunch = lunch_assignments.get(attendee.grade)
-        if expected_lunch:
-            lunch_periods = [
-                period for period, session_name in schedule.items()
-                if session_name == expected_lunch
-            ]
-            if not lunch_periods:
-                issues.append(
-                    ValidationIssue(
-                        "ERROR",
-                        "final_schedule_lunch",
-                        attendee.name,
-                        f"{attendee.grade} students must include '{expected_lunch}' in the final schedule.",
                     )
                 )
     return issues
